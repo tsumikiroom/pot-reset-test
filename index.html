@@ -5,17 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>pot-reset 試作 — 壺をつくる</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #f4f3ef; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: #5b6376; overflow: hidden; }
   body { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
          font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
   #hint { position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 28px); text-align: center;
-          color: #8a8984; font-size: 14px; letter-spacing: .08em; pointer-events: none; transition: opacity .6s; }
+          color: #c3c8d3; font-size: 14px; letter-spacing: .08em; pointer-events: none; transition: opacity .6s; }
   #swatches { position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 22px);
               display: flex; justify-content: center; gap: 14px; }
   #swatches button { width: 26px; height: 26px; border-radius: 50%; border: 0; padding: 0; cursor: pointer;
                      outline: 2px solid transparent; outline-offset: 3px; }
-  #swatches button.on { outline-color: #b9b8b2; }
+  #swatches button.on { outline-color: #c3c8d3; }
 </style>
 </head>
 <body>
@@ -24,16 +24,26 @@
 <div id="swatches"></div>
 <script>
 (() => {
-  // 色の組み合わせ（A → B）。angle はグラデーションの向き（0 = 左→右）、lo/hi は2色が混ざる帯の位置
+  // 色の組み合わせ（口 → 胴 → 底 の3色を高さでつなぐ）
   const PRESETS = [
-    { a: '#2ed6d2', b: '#2e3fd8', angle: -0.5, lo: 0.30, hi: 0.95 },  // シアン → 青
-    { a: '#ffad00', b: '#e8559a', angle: 0.9,  lo: 0.25, hi: 0.90 },  // オレンジ → ピンク
-    { a: '#2f3fd6', b: '#1f1f1d', angle: 0.2,  lo: 0.35, hi: 0.95 },  // 青 → 黒
-    { a: '#ffffff', b: '#2ed6d2', angle: 0.1,  lo: 0.05, hi: 0.70 },  // 白 × シアン
-  ];
-  const BG = hex('#f4f3ef');
+    ['#5b4dff', '#e3a9e6', '#c0603f'],  // 青紫 → ラベンダー → 赤茶
+    ['#d8141c', '#ffd03a', '#ffffff'],  // 赤 → 黄 → 白
+    ['#0a1238', '#1c2f93', '#4a9bff'],  // 紺 → 青 → 明るい青
+    ['#2fc22a', '#f0aee9', '#e9a5e4'],  // 緑 → ピンク
+    ['#8c8c8c', '#f4f4f4', '#c9c9c9'],  // グレー → 白
+    ['#0e0e0e', '#4a4a4a', '#f0f0f0'],  // 黒 → 白
+  ].map(p => p.map(hex));
+  const BG = hex('#5b6376');
   const N = 160;                 // 輪郭の分割数（高さ方向）
   const radius = new Float32Array(N);
+
+  // 見下ろす角度: 口のだ円のつぶれ具合（0 = 真横、1 = 真上）
+  const K = 0.28, KC = Math.sqrt(1 - K * K);
+  const RIM = 0.12;              // 口のふちの厚み（半径に対する割合）
+  // 光（左上手前から）と、見る向き、その中間（ハイライト用）
+  const L = norm([-0.45, 0.65, 0.6]), V = [0, K, KC], HV = norm([L[0] + V[0], L[1] + V[1], L[2] + V[2]]);
+  // 回転: 色の帯が表面ごと少し回って見える。SPIN は1秒あたりの回転量、SWIRL はその強さ
+  const SPIN = 1.6, SWIRL = 0.07;
 
   const cv = document.getElementById('c');
   const ctx = cv.getContext('2d');
@@ -42,62 +52,42 @@
   let img, buf;                  // 画面全体の画素
   let top, bottom, cx, rMin, rMax;
   let preset = PRESETS[Math.floor(Math.random() * PRESETS.length)];
-  let dirty = true, prevBox = null;
-
-  // 網点の間隔（CSS px）と、色の混ぜ具合の段数
-  const PITCH = 2.6, MIXN = 64;
-  // 濃さ t → 網点のしきい値。点の面積が t にちょうど比例するように、マス目を細かく調べて作る
-  const THRN = 256, THR = new Float32Array(THRN);
-  {
-    const G = 128, vals = [];
-    for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
-      const x = (i + 0.5) / G * 2 - 1, y = (j + 0.5) / G * 2 - 1, ax = Math.abs(x), ay = Math.abs(y);
-      vals.push(ax + ay <= 1 ? 1 - (x * x + y * y) : (ax - 1) * (ax - 1) + (ay - 1) * (ay - 1) - 1);
-    }
-    vals.sort((a, b) => b - a);
-    for (let k = 0; k < THRN; k++) {
-      const t = k / (THRN - 1);
-      THR[k] = t <= 0 ? 1.01 : t >= 1 ? -1.01 : vals[Math.min(vals.length - 1, Math.floor(t * vals.length))];
-    }
-  }
-
-  // 回転: phase（ラジアン）が時間で増える。SPIN は1秒あたりの回転量
-  const SPIN = 1.6;
-  let phase = 0, lastT = 0;
-  const TILT = 0.12;                // 見下ろす角度（網点の行の弧の深さ）
-  // 計算を軽くする asin の表
-  const AN = 2048, ASIN = new Float32Array(AN);
-  for (let i = 0; i < AN; i++) ASIN[i] = Math.asin(i / (AN - 1) * 2 - 1);
+  let prevBox = null, phase = 0, lastT = 0;
 
   function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
-  function pack([r, g, b]) { return (255 << 24) | (b << 16) | (g << 8) | r; }  // little-endian RGBA
+  function norm(v) { const l = Math.hypot(...v); return v.map(x => x / l); }
+  function pack(r, g, b) {       // little-endian RGBA。0〜255 に収める
+    r = r < 0 ? 0 : r > 255 ? 255 : r | 0; g = g < 0 ? 0 : g > 255 ? 255 : g | 0; b = b < 0 ? 0 : b > 255 ? 255 : b | 0;
+    return (255 << 24) | (b << 16) | (g << 8) | r;
+  }
 
   function layout() {
     if (!innerWidth || !innerHeight) return;
     const oldW = W;
     W = innerWidth; H = innerHeight;
-    S = Math.min(devicePixelRatio || 1, 2);
+    S = Math.min(devicePixelRatio || 1, 1.5);   // なめらかな陰影なので 1.5 倍で十分。重さを抑える
     cv.width = Math.round(W * S); cv.height = Math.round(H * S);
     img = ctx.createImageData(cv.width, cv.height);
     buf = new Uint32Array(img.data.buffer);
-    buf.fill(pack(BG));
+    buf.fill(pack(...BG));
     prevBox = null;
-    const potH = Math.min(H * 0.6, W * 1.5);
+    const potH = Math.min(H * 0.55, W * 1.4);
     top = H * 0.48 - potH / 2; bottom = top + potH;
     cx = W / 2;
-    rMin = W * 0.035; rMax = W * 0.46;
+    rMin = W * 0.035; rMax = W * 0.44;
     if (!oldW) radius.fill(Math.min(W * 0.2, potH * 0.3));          // 最初は筒
     else for (let i = 0; i < N; i++) radius[i] *= W / oldW;
-    dirty = true;
   }
 
-  // 高さ y（CSS px）での半径（線形補間）
+  // 高さ y（CSS px、輪郭の真横の位置）での半径（線形補間）
   function rAt(y) {
     const f = (y - top) / (bottom - top) * (N - 1);
     if (f <= 0) return radius[0];
     if (f >= N - 1) return radius[N - 1];
+    // なめらかな曲線でつなぐ（直線でつなぐと、光の当たり方に段々の横じまが出る）
     const i = Math.floor(f), t = f - i;
-    return radius[i] * (1 - t) + radius[i + 1] * t;
+    const p0 = radius[i > 0 ? i - 1 : 0], p1 = radius[i], p2 = radius[i + 1], p3 = radius[i + 2 < N ? i + 2 : N - 1];
+    return p1 + 0.5 * t * (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)));
   }
 
   // 指が横に動いた分だけ、その高さの周りをなめらかに押す・引く
@@ -111,13 +101,12 @@
       if (w < 0.002) continue;
       radius[i] = Math.min(rMax, Math.max(rMin, radius[i] + d * w));
     }
-    dirty = true;
   }
 
   // ---- 指 ----
   const pointers = new Map();
   cv.addEventListener('pointerdown', e => {
-    if (e.clientY < top - 30 || e.clientY > bottom + 30) return;
+    if (e.clientY < top - 40 || e.clientY > bottom + 40) return;
     try { cv.setPointerCapture(e.pointerId); } catch (_) {}
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     hint.style.opacity = 0;
@@ -136,71 +125,141 @@
   cv.addEventListener('pointercancel', up);
 
   // ---- 描画 ----
-  function render() {
-    const cA = hex(preset.a), cB = hex(preset.b), pBG = pack(BG);
-    // A と B の間の色の表（網点の境目をなめらかにするため）
-    const mixC = [], mixP = new Uint32Array(MIXN);
-    for (let i = 0; i < MIXN; i++) {
-      const c = [0, 1, 2].map(j => Math.round(cA[j] + (cB[j] - cA[j]) * i / (MIXN - 1)));
-      mixC.push(c); mixP[i] = pack(c);
+  // 壺を、高さごとの薄い輪切り（見下ろしたのでだ円）の積み重ねとして描く。
+  // 見下ろしたとき、画面の1列で見えるのは「いちばん高い輪切り」なので、
+  // 上から下へ輪切りをたどり、まだ塗っていない所（前の輪切りの手前のふちより下）だけを塗る。
+  let SR = new Float32Array(0), SD = new Float32Array(0);
+  // 列ごとの「塗り済みの区間」と、輪切りごとの「すき間」の作業用（区間は数本で足りる）
+  const IMAX = 64, IA = new Float64Array(IMAX), IB = new Float64Array(IMAX);
+  const GMAX = 64, GA = new Float64Array(GMAX), GB = new Float64Array(GMAX);
+  // 区間 [a, b] を塗り済みに足して、重なる・接する区間を1本にまとめる。新しい本数を返す
+  function addSpan(n, a, b) {
+    let k = 0;
+    while (k < n && IB[k] < a) k++;                       // a より前で終わる区間はそのまま
+    let m = k;
+    while (m < n && IA[m] <= b) { if (IA[m] < a) a = IA[m]; if (IB[m] > b) b = IB[m]; m++; }  // 重なる区間を吸収
+    const removed = m - k;
+    if (removed === 0) {                                   // 間に差し込む
+      if (n >= IMAX) return n;
+      for (let i = n; i > k; i--) { IA[i] = IA[i - 1]; IB[i] = IB[i - 1]; }
+      IA[k] = a; IB[k] = b; return n + 1;
     }
-    const pitchPx = PITCH * S, fpy = 1 / pitchPx, colK = W * 0.2 / PITCH;  // colK: 1ラジアンあたりの列数
-    const ca = Math.cos(preset.angle), sa = Math.sin(preset.angle);
-    const lo = preset.lo, span = preset.hi - preset.lo;
-    const cw = cv.width;
+    IA[k] = a; IB[k] = b;
+    for (let i = m; i < n; i++) { IA[i - removed + 1] = IA[i]; IB[i - removed + 1] = IB[i]; }
+    return n - removed + 1;
+  }
+  const CN = 768, CK = CN / 1.5, CT = new Float32Array(CN * 3);
+  // 計算を軽くする表: asin(x)×1.5 と sin
+  const AN = 2048, ASIN15 = new Float32Array(AN);
+  for (let i = 0; i < AN; i++) ASIN15[i] = 1.5 * Math.asin(i / (AN - 1) * 2 - 1);
+  const SN = 1024, SM = SN - 1, SK = SN / (2 * Math.PI), SIN = new Float32Array(SN);
+  for (let i = 0; i < SN; i++) SIN[i] = Math.sin(i / SK);
+  function colorAt(g, out, o) {  // 高さ g（0 = 口、1 = 底）の色を3色からなめらかに作る
+    g = g < 0 ? 0 : g > 1 ? 1 : g;
+    const a = g < 0.5 ? preset[0] : preset[1], b = g < 0.5 ? preset[1] : preset[2];
+    let t = g < 0.5 ? g * 2 : g * 2 - 1;
+    t = t * t * (3 - 2 * t);
+    for (let k = 0; k < 3; k++) out[o + k] = a[k] + (b[k] - a[k]) * t;
+  }
 
-    // 前の形の範囲を背景で消す
-    let maxR = 0; for (let i = 0; i < N; i++) maxR = Math.max(maxR, radius[i]);
-    const box = { x0: Math.max(0, Math.floor((cx - maxR) * S) - 2), x1: Math.min(cw, Math.ceil((cx + maxR) * S) + 2),
-                  y0: Math.max(0, Math.floor(top * S) - 1), y1: Math.min(cv.height, Math.ceil(bottom * S) + 1) };
+  function render() {
+    const cw = cv.width, chh = cv.height, pBG = pack(...BG);
+    const Ls = Math.max(2, Math.round((bottom - top) * S));     // 輪切りの数（1画素に1枚）
+    if (SR.length < Ls + 1) { SR = new Float32Array(Ls + 1); SD = new Float32Array(Ls + 1); }
+    let maxR = 0;
+    for (let j = 0; j <= Ls; j++) { SR[j] = rAt(top + j / S) * S; if (SR[j] > maxR) maxR = SR[j]; }
+    for (let j = 0; j <= Ls; j++) {   // 半径の変わり方（下へ広がる所は上を向いた面）
+      const a = SR[j > 0 ? j - 1 : 0], b = SR[j < Ls ? j + 1 : Ls];
+      SD[j] = (b - a) / ((j > 0 && j < Ls) ? 2 : 1) / KC;
+    }
+
+    const box = { x0: Math.max(0, Math.floor(cx * S - maxR) - 2), x1: Math.min(cw, Math.ceil(cx * S + maxR) + 2),
+                  y0: Math.max(0, Math.floor(top * S - K * maxR) - 2), y1: Math.min(chh, Math.ceil(bottom * S + K * maxR) + 2) };
     const clear = prevBox ? { x0: Math.min(box.x0, prevBox.x0), x1: Math.max(box.x1, prevBox.x1), y0: Math.min(box.y0, prevBox.y0), y1: Math.max(box.y1, prevBox.y1) } : box;
     for (let y = clear.y0; y < clear.y1; y++) buf.fill(pBG, y * cw + clear.x0, y * cw + clear.x1);
 
-    const pcx = cx * S;
-    for (let py = box.y0; py < box.y1; py++) {
-      const yc = (py + 0.5) / S;
-      if (yc < top || yc > bottom) continue;
-      const r = rAt(yc) * S;
-      const v = (yc - top) / (bottom - top) * 2 - 1;      // -1（上）〜 1（下）
-      const x0 = Math.max(0, Math.floor(pcx - r - 1)), x1 = Math.min(cw, Math.ceil(pcx + r + 1));
-      const row = py * cw;
-      const r2 = r * r;
-      for (let px = x0; px < x1; px++) {
-        const dx = px + 0.5 - pcx;
-        const cover = r - Math.abs(dx) + 0.5;               // ふちの1画素だけ半透明
-        if (cover <= 0) continue;
-        let u = dx / r;                                      // -1（左）〜 1（右）。輪郭に沿って曲がる
-        if (u > 1) u = 1; else if (u < -1) u = -1;
-        const th = ASIN[((u + 1) * 0.5 * (AN - 1)) | 0];     // 正面からの角度（回転体の表面）
-        let t = 0.5 + 0.5 * (ca * u + sa * v) * 0.85;
-        t = (t - lo) / span;
-        if (t < 0) t = 0; else if (t > 1) t = 1;
-        // 網点: 表面に巻きついた格子（経線方向の列は回転で流れる）。濃いほど点が大きい
-        const colF = (th + phase) * colK;
-        const fx = (colF - Math.floor(colF)) * 2 - 1, ax = Math.abs(fx);
-        const sq = r2 - dx * dx;
-        // 行は少し上から見下ろした弧（手前ほど下がる）。回っている胴に見える
-        const rowF = (py - TILT * Math.sqrt(sq > 0 ? sq : 0)) / pitchPx;
-        const fy = (rowF - Math.floor(rowF)) * 2 - 1, ay = Math.abs(fy);
-        // 1画素が格子の何マス分か（ふちに近いほど横に詰まる）
-        const fpx = colK / Math.sqrt(sq > 0.25 ? sq : 0.25);
-        const fp = fpx > fpy ? fpx : fpy;
-        let m = t;                                           // 0 = A、1 = B。点が1画素より細かい所は平均の色
-        if (fp < 0.5) {
-          const spot = ax + ay <= 1 ? 1 - (fx * fx + fy * fy)
-                                    : (ax - 1) * (ax - 1) + (ay - 1) * (ay - 1) - 1;  // 丸い網点（濃くなると反転してつながる）
-          let d = (spot - THR[(t * (THRN - 1) + 0.5) | 0]) / (4 * fp) + 0.5;  // 境目を1画素ぶんだけなめらかに
-          if (d < 0) d = 0; else if (d > 1) d = 1;
-          // 点が細かくなるにつれて平均の色へ少しずつ移す（境目に線が出ないように）
-          const k = fp < 0.25 ? 0 : (fp - 0.25) * 4;
-          m = d + (t - d) * k;
+    const pcx = cx * S, Y0 = top * S;
+    const r0 = SR[0], ri = r0 * (1 - RIM);
+    const topC = [0, 0, 0];
+    colorAt(0, topC, 0);
+    for (let i = 0; i < CN; i++) colorAt(i / CK - 0.25, CT, i * 3);   // 高さ → 色 の表
+
+    for (let px = box.x0; px < box.x1; px++) {
+      const dx = px + 0.5 - pcx, adx = Math.abs(dx);
+      let n = 0;                               // この列でもう塗った範囲（上から順の区間、IA〜IB）の数
+
+      // 口（いちばん上の輪切り）: ふちと、中の暗がり
+      if (adx < r0 + 0.5) {
+        const s0 = Math.sqrt(Math.max(0, r0 * r0 - dx * dx));
+        const si = adx < ri ? Math.sqrt(ri * ri - dx * dx) : -1;
+        const cov = Math.min(1, r0 - adx + 0.5);
+        const ya = Y0 - K * s0, yb = Y0 + K * s0;
+        for (let py = Math.max(box.y0, Math.ceil(ya - 0.5)); py + 0.5 <= yb && py < box.y1; py++) {
+          const y = py + 0.5;
+          let r, g, b;
+          if (si >= 0 && y > Y0 - K * si && y < Y0 + K * si) {
+            // 中: 奥の壁（画面の上側）は光が当たって明るく、手前の壁の内側は暗い
+            const f = (y - (Y0 - K * si)) / (2 * K * si);
+            const lv = 0.1 + 0.45 * (1 - f) * (1 - f);
+            r = topC[0] * lv; g = topC[1] * lv; b = topC[2] * lv;
+          } else {
+            const lv = 1.15;                    // ふちの上面は明るい
+            r = topC[0] * lv + 20; g = topC[1] * lv + 20; b = topC[2] * lv + 20;
+          }
+          if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; g = BG[1] + (g - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
+          buf[py * cw + px] = pack(r, g, b);
         }
-        const k = (m * (MIXN - 1) + 0.5) | 0;
-        if (cover >= 1) buf[row + px] = mixP[k];
-        else {
-          const c = mixC[k];
-          buf[row + px] = pack([0, 1, 2].map(j => Math.round(BG[j] + (c[j] - BG[j]) * cover)));
+        if (cov >= 1) { IA[0] = ya; IB[0] = yb; n = 1; }
+      }
+
+      // 胴: 上から下へ。各輪切りは、まだ塗っていない所だけが見える
+      for (let j = 1; j <= Ls; j++) {
+        const rj = SR[j];
+        if (rj + 0.5 <= adx) continue;
+        const s = Math.sqrt(Math.max(0, rj * rj - dx * dx));
+        const Yj = Y0 + j;
+        const yf = Yj + K * s, yt = Yj - K * s;
+        // この輪切りが画面で占める範囲（だ円の奥の上端 yt 〜 手前のふち yf）のうち、
+        // まだ塗っていない「すき間」だけが見える（塗り済みの所には、もっと高い輪切りが見えている）
+        let g = 0, cur = yt;
+        for (let k = 0; k < n && g < GMAX; k++) {
+          if (IB[k] <= cur) continue;
+          if (IA[k] >= yf) break;
+          if (IA[k] > cur) { GA[g] = cur; GB[g] = IA[k]; g++; }
+          cur = IB[k];
         }
+        if (cur < yf && g < GMAX) { GA[g] = cur; GB[g] = yf; g++; }
+        let paint = false;
+        for (let k = 0; k < g; k++) if (Math.floor(GB[k] - 0.5) >= Math.floor(GA[k] - 0.5) + 1) { paint = true; break; }
+        if (paint) {
+          // 表面の向き（法線）: 横は回転体の角度、縦は半径の変わり方から
+          const sp = rj > 0 ? Math.max(-1, Math.min(1, dx / rj)) : 0, cp = Math.sqrt(1 - sp * sp);
+          const d = SD[j], il = 1 / Math.sqrt(1 + d * d);
+          const nx = sp * il, ny = d * il, nz = cp * il;
+          const nl = nx * L[0] + ny * L[1] + nz * L[2];
+          const nv = nx * V[0] + ny * V[1] + nz * V[2];
+          const nh = nx * HV[0] + ny * HV[1] + nz * HV[2];
+          // 色: 高さで3色。回転に合わせて色の帯が少し横へ流れる
+          const sw = SIN[((ASIN15[((sp + 1) * 0.5 * (AN - 1)) | 0] + phase) * SK) & SM];
+          const ci = (((j / Ls + SWIRL * sw) + 0.25) * CK) | 0;   // 色の表は g = -0.25〜1.25
+          const co = (ci < 0 ? 0 : ci >= CN ? CN - 1 : ci) * 3;
+          const lit = 0.25 + 0.85 * (nl > 0 ? nl : 0);              // 光の当たり具合
+          const edge = 0.4 + 0.6 * Math.sqrt(nv > 0 ? nv : 0);      // 輪郭に近いほど暗く（丸みが出る）
+          let h = nh > 0 ? nh : 0; h *= h; h *= h; h *= h; h *= h;  // h^16 → ハイライトの広がり
+          const spec = 80 * h * h + 25 * h;      // h^32 の鋭い芯 + やわらかい広がり
+          const m = lit * edge;
+          let r = CT[co] * m + spec, gg = CT[co + 1] * m + spec, b = CT[co + 2] * m + spec;
+          const cov = Math.min(1, rj - adx + 0.5);
+          if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; gg = BG[1] + (gg - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
+          const c = pack(r, gg, b);
+          for (let k = 0; k < g; k++) {        // 画素の中心が (GA, GB] に入るものを塗る
+            const p0 = Math.max(box.y0, Math.floor(GA[k] - 0.5) + 1), p1 = Math.min(box.y1 - 1, Math.floor(GB[k] - 0.5));
+            for (let py = p0; py <= p1; py++) buf[py * cw + px] = c;
+          }
+        }
+        // 輪郭で半分だけかかった輪切り（背景と混ぜて薄く塗った所）は「塗り済み」にしない。
+        // 下にしっかりかかる輪切りがあれば上から塗り直し、無ければ薄い色のまま輪郭のぼかしになる
+        if (rj - adx + 0.5 >= 1 && g > 0) n = addSpan(n, yt, yf);
       }
     }
     ctx.putImageData(img, 0, 0, clear.x0, clear.y0, clear.x1 - clear.x0, clear.y1 - clear.y0);
@@ -210,18 +269,19 @@
   function frame(now) {
     const dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
     lastT = now;
-    phase += dt * SPIN;                                       // 折り返さない（折り返すと網点の模様が飛ぶ）。いつも回っているので毎フレーム描く
-    render(); dirty = false;
+    phase += dt * SPIN;                // 回り続けるので毎フレーム描く
+    render();
     requestAnimationFrame(frame);
   }
 
   // ---- 色の切り替え（試作用） ----
   const sw = document.getElementById('swatches');
+  const css = c => `rgb(${c.join(',')})`;
   PRESETS.forEach(p => {
     const b = document.createElement('button');
-    b.style.background = `linear-gradient(135deg, ${p.a} 50%, ${p.b} 50%)`;
+    b.style.background = `linear-gradient(180deg, ${css(p[0])}, ${css(p[1])}, ${css(p[2])})`;
     b.setAttribute('aria-label', '色');
-    b.onclick = () => { preset = p; dirty = true; mark(); };
+    b.onclick = () => { preset = p; mark(); };
     sw.appendChild(b);
   });
   function mark() { [...sw.children].forEach((b, i) => b.classList.toggle('on', PRESETS[i] === preset)); }
@@ -230,7 +290,7 @@
   addEventListener('resize', layout);
   layout();
   requestAnimationFrame(frame);
-  window.__pot = { radius, get top() { return top; }, get bottom() { return bottom; }, get cx() { return cx; } };
+  window.__pot = { radius, render, get top() { return top; }, get bottom() { return bottom; }, get cx() { return cx; } };
 })();
 </script>
 </body>
