@@ -24,7 +24,7 @@
 <div id="swatches"></div>
 <script>
 (() => {
-  // 色の組み合わせ（A → B）。angle はグラデーションの向き（0 = 左→右）、lo/hi は粒が混ざる帯の位置
+  // 色の組み合わせ（A → B）。angle はグラデーションの向き（0 = 左→右）、lo/hi は2色が混ざる帯の位置
   const PRESETS = [
     { a: '#2ed6d2', b: '#2e3fd8', angle: -0.5, lo: 0.30, hi: 0.95 },  // シアン → 青
     { a: '#ffad00', b: '#e8559a', angle: 0.9,  lo: 0.25, hi: 0.90 },  // オレンジ → ピンク
@@ -44,20 +44,30 @@
   let preset = PRESETS[Math.floor(Math.random() * PRESETS.length)];
   let dirty = true, prevBox = null;
 
-  // 粒用のノイズ（固定。毎回同じ並びなので、形を変えても粒がちらつかない）
-  const NS = 256, noise = new Float32Array(NS * NS);
-  for (let i = 0; i < noise.length; i++) noise[i] = Math.random();
+  // 網点の間隔（CSS px）と、色の混ぜ具合の段数
+  const PITCH = 2.6, MIXN = 64;
+  // 濃さ t → 網点のしきい値。点の面積が t にちょうど比例するように、マス目を細かく調べて作る
+  const THRN = 256, THR = new Float32Array(THRN);
+  {
+    const G = 128, vals = [];
+    for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+      const x = (i + 0.5) / G * 2 - 1, y = (j + 0.5) / G * 2 - 1, ax = Math.abs(x), ay = Math.abs(y);
+      vals.push(ax + ay <= 1 ? 1 - (x * x + y * y) : (ax - 1) * (ax - 1) + (ay - 1) * (ay - 1) - 1);
+    }
+    vals.sort((a, b) => b - a);
+    for (let k = 0; k < THRN; k++) {
+      const t = k / (THRN - 1);
+      THR[k] = t <= 0 ? 1.01 : t >= 1 ? -1.01 : vals[Math.min(vals.length - 1, Math.floor(t * vals.length))];
+    }
+  }
 
   // 回転: phase（ラジアン）が時間で増える。SPIN は1秒あたりの回転量
   const SPIN = 1.6;
   let phase = 0, lastT = 0;
-  const RING_K = 2 * Math.PI / 9;   // ろくろ目の間隔（約 9 CSS px）
-  const RING_AMP = 0.06;            // ろくろ目の濃さ
-  // 計算を軽くする表（asin と sin）
+  const TILT = 0.12;                // 見下ろす角度（網点の行の弧の深さ）
+  // 計算を軽くする asin の表
   const AN = 2048, ASIN = new Float32Array(AN);
   for (let i = 0; i < AN; i++) ASIN[i] = Math.asin(i / (AN - 1) * 2 - 1);
-  const SN = 1024, SM = SN - 1, SK = SN / (2 * Math.PI), SIN = new Float32Array(SN);
-  for (let i = 0; i < SN; i++) SIN[i] = Math.sin(i / SK);
 
   function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
   function pack([r, g, b]) { return (255 << 24) | (b << 16) | (g << 8) | r; }  // little-endian RGBA
@@ -127,8 +137,14 @@
 
   // ---- 描画 ----
   function render() {
-    const cA = hex(preset.a), cB = hex(preset.b);
-    const pA = pack(cA), pB = pack(cB), pBG = pack(BG);
+    const cA = hex(preset.a), cB = hex(preset.b), pBG = pack(BG);
+    // A と B の間の色の表（網点の境目をなめらかにするため）
+    const mixC = [], mixP = new Uint32Array(MIXN);
+    for (let i = 0; i < MIXN; i++) {
+      const c = [0, 1, 2].map(j => Math.round(cA[j] + (cB[j] - cA[j]) * i / (MIXN - 1)));
+      mixC.push(c); mixP[i] = pack(c);
+    }
+    const pitchPx = PITCH * S, fpy = 1 / pitchPx, colK = W * 0.2 / PITCH;  // colK: 1ラジアンあたりの列数
     const ca = Math.cos(preset.angle), sa = Math.sin(preset.angle);
     const lo = preset.lo, span = preset.hi - preset.lo;
     const cw = cv.width;
@@ -147,8 +163,8 @@
       const r = rAt(yc) * S;
       const v = (yc - top) / (bottom - top) * 2 - 1;      // -1（上）〜 1（下）
       const x0 = Math.max(0, Math.floor(pcx - r - 1)), x1 = Math.min(cw, Math.ceil(pcx + r + 1));
-      const row = py * cw, nrow = (py % NS) * NS;
-      const ringRow = yc * RING_K;
+      const row = py * cw;
+      const r2 = r * r;
       for (let px = x0; px < x1; px++) {
         const dx = px + 0.5 - pcx;
         const cover = r - Math.abs(dx) + 0.5;               // ふちの1画素だけ半透明
@@ -156,20 +172,34 @@
         let u = dx / r;                                      // -1（左）〜 1（右）。輪郭に沿って曲がる
         if (u > 1) u = 1; else if (u < -1) u = -1;
         const th = ASIN[((u + 1) * 0.5 * (AN - 1)) | 0];     // 正面からの角度（回転体の表面）
-        // ろくろ目: 横すじ。回転に合わせて少し波打つ
-        const wob = SIN[(((th + phase) * 2 + v * 3) * SK) & SM];   // & SM は負の数でも正しく 0〜SM に折り返す
-        const ring = SIN[((ringRow + wob * 0.9) * SK) & SM];
-        let t = 0.5 + 0.5 * (ca * u + sa * v) * 0.85 + ring * RING_AMP;
+        let t = 0.5 + 0.5 * (ca * u + sa * v) * 0.85;
         t = (t - lo) / span;
-        // 粒は表面に貼りついて回る（真ん中は速く、ふちほど詰まって見える）
-        let s = ((th + phase) * r) % NS;
-        if (s < 0) s += NS;
-        const n = noise[nrow + ((s | 0) & (NS - 1))];
-        const col = n < t ? pB : pA;
-        if (cover >= 1) buf[row + px] = col;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        // 網点: 表面に巻きついた格子（経線方向の列は回転で流れる）。濃いほど点が大きい
+        const colF = (th + phase) * colK;
+        const fx = (colF - Math.floor(colF)) * 2 - 1, ax = Math.abs(fx);
+        const sq = r2 - dx * dx;
+        // 行は少し上から見下ろした弧（手前ほど下がる）。回っている胴に見える
+        const rowF = (py - TILT * Math.sqrt(sq > 0 ? sq : 0)) / pitchPx;
+        const fy = (rowF - Math.floor(rowF)) * 2 - 1, ay = Math.abs(fy);
+        // 1画素が格子の何マス分か（ふちに近いほど横に詰まる）
+        const fpx = colK / Math.sqrt(sq > 0.25 ? sq : 0.25);
+        const fp = fpx > fpy ? fpx : fpy;
+        let m = t;                                           // 0 = A、1 = B。点が1画素より細かい所は平均の色
+        if (fp < 0.5) {
+          const spot = ax + ay <= 1 ? 1 - (fx * fx + fy * fy)
+                                    : (ax - 1) * (ax - 1) + (ay - 1) * (ay - 1) - 1;  // 丸い網点（濃くなると反転してつながる）
+          let d = (spot - THR[(t * (THRN - 1) + 0.5) | 0]) / (4 * fp) + 0.5;  // 境目を1画素ぶんだけなめらかに
+          if (d < 0) d = 0; else if (d > 1) d = 1;
+          // 点が細かくなるにつれて平均の色へ少しずつ移す（境目に線が出ないように）
+          const k = fp < 0.25 ? 0 : (fp - 0.25) * 4;
+          m = d + (t - d) * k;
+        }
+        const k = (m * (MIXN - 1) + 0.5) | 0;
+        if (cover >= 1) buf[row + px] = mixP[k];
         else {
-          const c = n < t ? cB : cA;
-          buf[row + px] = pack([0, 1, 2].map(k => Math.round(BG[k] + (c[k] - BG[k]) * cover)));
+          const c = mixC[k];
+          buf[row + px] = pack([0, 1, 2].map(j => Math.round(BG[j] + (c[j] - BG[j]) * cover)));
         }
       }
     }
@@ -180,7 +210,7 @@
   function frame(now) {
     const dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
     lastT = now;
-    phase += dt * SPIN;                                       // 折り返さない（折り返すと粒の模様が飛ぶ）。いつも回っているので毎フレーム描く
+    phase += dt * SPIN;                                       // 折り返さない（折り返すと網点の模様が飛ぶ）。いつも回っているので毎フレーム描く
     render(); dirty = false;
     requestAnimationFrame(frame);
   }
