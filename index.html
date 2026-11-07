@@ -9,8 +9,6 @@
   body { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
          font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-  /* にじみ: 壺だけを小さく写してぼかし、明るく重ねる（輪郭から色がにじむ） */
-  #g { pointer-events: none; filter: blur(16px); mix-blend-mode: screen; opacity: .35; }
   #hint { position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 28px); text-align: center;
           color: #c3c8d3; font-size: 14px; letter-spacing: .08em; pointer-events: none; transition: opacity .6s; }
   #swatches { position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 22px);
@@ -22,7 +20,6 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<canvas id="g"></canvas>
 <div id="hint">ふちを指で押す・引く</div>
 <div id="swatches"></div>
 <script>
@@ -46,7 +43,7 @@
 
   // 見下ろす角度: 口のだ円のつぶれ具合（0 = 真横、1 = 真上）
   const K = 0.28, KC = Math.sqrt(1 - K * K);
-  const RIM = 0.12;              // 口のふちの厚み（半径に対する割合）
+  const RIM = 0.14;              // 口のふちの厚み（半径に対する割合）
   // 光（左上手前から）と、見る向き、その中間（ハイライト用）
   const L = norm([-0.45, 0.65, 0.6]), V = [0, K, KC], HV = norm([L[0] + V[0], L[1] + V[1], L[2] + V[2]]);
   // 回転: 色の帯が表面ごと少し回って見える。SPIN は1秒あたりの回転量、SWIRL はその強さ
@@ -54,7 +51,6 @@
 
   const cv = document.getElementById('c');
   const ctx = cv.getContext('2d');
-  const gv = document.getElementById('g'), gctx = gv.getContext('2d');
   const hint = document.getElementById('hint');
   let W = 0, H = 0, S = 1;       // CSS px と描画倍率
   let img, buf;                  // 画面全体の画素
@@ -77,8 +73,7 @@
     cv.width = Math.round(W * S); cv.height = Math.round(H * S);
     img = ctx.createImageData(cv.width, cv.height);
     buf = new Uint32Array(img.data.buffer);
-    buf.fill(0);                 // 背景は透明（ページの背景色が見える）。にじみ用に壺だけを写せる
-    gv.width = Math.ceil(W / 4); gv.height = Math.ceil(H / 4);
+    buf.fill(0);                 // 背景は透明（ページの背景色が見える）
     prevBox = null;
     const potH = Math.min(H * 0.55, W * 1.4);
     top = H * 0.48 - potH / 2; bottom = top + potH;
@@ -171,6 +166,27 @@
     for (let k = 0; k < 3; k++) out[o + k] = a[k] + (b[k] - a[k]) * t;
   }
 
+  // 面の向き n と、その場所の色（表の位置 co）から色を作る。結果は OUT に入る
+  // 陰はごく弱く（立体感は主にリムで出す）。リム（フレネル）は正面から輪郭へ向かって、
+  // 別の色（リムの色）へ置きかえていく。幅は広く、輪郭ではほぼリムの色だけになる。
+  // hz は横の向き（正面=1）。下を向いた面までリム一色にならないよう、N·V に半分まぜる
+  const OUT = [0, 0, 0];
+  function shade(nx, ny, nz, hz, co) {
+    const nl = nx * L[0] + ny * L[1] + nz * L[2];
+    const nv = nx * V[0] + ny * V[1] + nz * V[2];
+    const nh = nx * HV[0] + ny * HV[1] + nz * HV[2];
+    let w = (nl + 0.5) / 1.5; w = w > 0 ? w : 0;
+    const m = 0.9 + 0.15 * w;
+    let h = nh > 0 ? nh : 0; h *= h; h *= h;
+    const spec = 8 * h;
+    const nf = 0.55 * (nv > 0 ? nv : 0) + 0.45 * (hz > 0 ? hz : 0);
+    let t = (1 - nf - 0.06) / 0.62; t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const fr = t * t * (3 - 2 * t), km = 1 - fr;
+    OUT[0] = (CT[co] * m + spec) * km + RT[co] * fr;
+    OUT[1] = (CT[co + 1] * m + spec) * km + RT[co + 1] * fr;
+    OUT[2] = (CT[co + 2] * m + spec) * km + RT[co + 2] * fr;
+  }
+
   function render() {
     const cw = cv.width, chh = cv.height, pBG = 0;
     const Ls = Math.max(2, Math.round((bottom - top) * S));     // 輪切りの数（1画素に1枚）
@@ -189,7 +205,7 @@
 
     const pcx = cx * S, Y0 = top * S;
     const r0 = SR[0], ri = r0 * (1 - RIM);
-    const topC = [0, 0, 0];
+    const topC = [0, 0, 0], MOUTH_CO = ((0.25 * CK) | 0) * 3;   // 口の高さ（g = 0）の色の位置
     colorAt(0, topC, 0);
     for (let i = 0; i < CN; i++) colorAt(i / CK - 0.25, CT, i * 3);   // 高さ → 色 の表
     for (let i = 0; i < CN; i++) {                                     // 高さ → リムの色 の表
@@ -211,13 +227,19 @@
           const y = py + 0.5;
           let r, g, b;
           if (si >= 0 && y > Y0 - K * si && y < Y0 + K * si) {
-            // 中: 奥の壁（画面の上側）は光が当たって明るく、手前の壁の内側は暗い
+            // 中: 手前の壁の内側ほど少し暗い（最大で2割）
             const f = (y - (Y0 - K * si)) / (2 * K * si);
-            const lv = 0.1 + 0.45 * (1 - f) * (1 - f);
+            const lv = 0.8 + 0.2 * (1 - f) * (1 - f);
             r = topC[0] * lv; g = topC[1] * lv; b = topC[2] * lv;
           } else {
-            const lv = 1.15;                    // ふちの上面は明るい
-            r = topC[0] * lv + 20; g = topC[1] * lv + 20; b = topC[2] * lv + 20;
+            // ふち: 面取りして丸く。ふちの幅の中で、面の向きが内向き → 上 → 外向きへ回る
+            const z = (y - Y0) / K, rho = Math.sqrt(dx * dx + z * z) || 1;
+            let u = (rho - ri) / (r0 - ri); u = u < 0 ? 0 : u > 1 ? 1 : u;
+            const th = (2 * u - 1) * 1.45, st = Math.sin(th);
+            const ct = Math.cos(th);
+            // 横の向き: 上向き〜外向きの所は手前ほど正面、内向き（口の内側へ落ちる所）は奥向き
+            shade(st * dx / rho, ct, st * z / rho, Math.min(1, ct + st) * z / rho, MOUTH_CO);
+            r = OUT[0]; g = OUT[1]; b = OUT[2];
           }
           if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; g = BG[1] + (g - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
           buf[py * cw + px] = pack(r, g, b);
@@ -249,28 +271,12 @@
           const sp = rj > 0 ? Math.max(-1, Math.min(1, dx / rj)) : 0, cp = Math.sqrt(1 - sp * sp);
           const d = SD[j], il = 1 / Math.sqrt(1 + d * d);
           const nx = sp * il, ny = d * il, nz = cp * il;
-          const nl = nx * L[0] + ny * L[1] + nz * L[2];
-          const nv = nx * V[0] + ny * V[1] + nz * V[2];
-          const nh = nx * HV[0] + ny * HV[1] + nz * HV[2];
           // 色: 高さで3色。回転に合わせて色の帯が少し横へ流れる
           const sw = SIN[((ASIN15[((sp + 1) * 0.5 * (AN - 1)) | 0] + phase) * SK) & SM];
           const ci = (((j / Ls + SWIRL * sw) + 0.25) * CK) | 0;   // 色の表は g = -0.25〜1.25
           const co = (ci < 0 ? 0 : ci >= CN ? CN - 1 : ci) * 3;
-          // マット: 光はほぼ均一（陰はうっすら）。つやは広く弱く
-          let w = (nl + 0.5) / 1.5; w = w > 0 ? w : 0;
-          const m = 0.72 + 0.38 * w;
-          const nvc = nv > 0 ? nv : 0;
-          let h = nh > 0 ? nh : 0; h *= h; h *= h;
-          const spec = 14 * h;
-          // リム（フレネル）: 正面から輪郭へ向かって、別の色（リムの色）へ置きかえていく。
-          // 幅は広く、正面のすぐ外から始まり、輪郭ではほぼリムの色だけになる
-          // 下を向いた面（胴のふくらみの下）までリム一色にならないよう、横の向き（cp）も半分まぜる
-          const nf = 0.55 * nvc + 0.45 * cp;
-          let t = (1 - nf - 0.06) / 0.62; t = t < 0 ? 0 : t > 1 ? 1 : t;
-          const fr = t * t * (3 - 2 * t), km = 1 - fr;
-          let r = (CT[co] * m + spec) * km + RT[co] * fr,
-              gg = (CT[co + 1] * m + spec) * km + RT[co + 1] * fr,
-              b = (CT[co + 2] * m + spec) * km + RT[co + 2] * fr;
+          shade(nx, ny, nz, cp, co);
+          let r = OUT[0], gg = OUT[1], b = OUT[2];
           const cov = Math.min(1, rj - adx + 0.5);
           if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; gg = BG[1] + (gg - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
           const c = pack(r, gg, b);
@@ -285,8 +291,6 @@
       }
     }
     ctx.putImageData(img, 0, 0, clear.x0, clear.y0, clear.x1 - clear.x0, clear.y1 - clear.y0);
-    gctx.clearRect(0, 0, gv.width, gv.height);
-    gctx.drawImage(cv, 0, 0, gv.width, gv.height);
     prevBox = box;
   }
 
