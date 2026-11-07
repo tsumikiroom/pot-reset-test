@@ -9,6 +9,8 @@
   body { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
          font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  /* にじみ: 壺だけを小さく写してぼかし、明るく重ねる（輪郭から色がにじむ） */
+  #g { pointer-events: none; filter: blur(16px); mix-blend-mode: screen; opacity: .7; }
   #hint { position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 28px); text-align: center;
           color: #c3c8d3; font-size: 14px; letter-spacing: .08em; pointer-events: none; transition: opacity .6s; }
   #swatches { position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 22px);
@@ -20,6 +22,7 @@
 </head>
 <body>
 <canvas id="c"></canvas>
+<canvas id="g"></canvas>
 <div id="hint">ふちを指で押す・引く</div>
 <div id="swatches"></div>
 <script>
@@ -47,6 +50,7 @@
 
   const cv = document.getElementById('c');
   const ctx = cv.getContext('2d');
+  const gv = document.getElementById('g'), gctx = gv.getContext('2d');
   const hint = document.getElementById('hint');
   let W = 0, H = 0, S = 1;       // CSS px と描画倍率
   let img, buf;                  // 画面全体の画素
@@ -69,7 +73,8 @@
     cv.width = Math.round(W * S); cv.height = Math.round(H * S);
     img = ctx.createImageData(cv.width, cv.height);
     buf = new Uint32Array(img.data.buffer);
-    buf.fill(pack(...BG));
+    buf.fill(0);                 // 背景は透明（ページの背景色が見える）。にじみ用に壺だけを写せる
+    gv.width = Math.ceil(W / 4); gv.height = Math.ceil(H / 4);
     prevBox = null;
     const potH = Math.min(H * 0.55, W * 1.4);
     top = H * 0.48 - potH / 2; bottom = top + potH;
@@ -163,7 +168,7 @@
   }
 
   function render() {
-    const cw = cv.width, chh = cv.height, pBG = pack(...BG);
+    const cw = cv.width, chh = cv.height, pBG = 0;
     const Ls = Math.max(2, Math.round((bottom - top) * S));     // 輪切りの数（1画素に1枚）
     if (SR.length < Ls + 1) { SR = new Float32Array(Ls + 1); SD = new Float32Array(Ls + 1); }
     let maxR = 0;
@@ -243,12 +248,19 @@
           const sw = SIN[((ASIN15[((sp + 1) * 0.5 * (AN - 1)) | 0] + phase) * SK) & SM];
           const ci = (((j / Ls + SWIRL * sw) + 0.25) * CK) | 0;   // 色の表は g = -0.25〜1.25
           const co = (ci < 0 ? 0 : ci >= CN ? CN - 1 : ci) * 3;
-          const lit = 0.25 + 0.85 * (nl > 0 ? nl : 0);              // 光の当たり具合
-          const edge = 0.4 + 0.6 * Math.sqrt(nv > 0 ? nv : 0);      // 輪郭に近いほど暗く（丸みが出る）
-          let h = nh > 0 ? nh : 0; h *= h; h *= h; h *= h; h *= h;  // h^16 → ハイライトの広がり
-          const spec = 80 * h * h + 25 * h;      // h^32 の鋭い芯 + やわらかい広がり
-          const m = lit * edge;
-          let r = CT[co] * m + spec, gg = CT[co + 1] * m + spec, b = CT[co + 2] * m + spec;
+          // マット: 光は裏側まで回り込ませ（やわらかい陰）、つやは広くぼんやり
+          let w = (nl + 0.5) / 1.5; w = w > 0 ? w : 0;
+          const lit = 0.22 + 0.9 * w * w;
+          const nvc = nv > 0 ? nv : 0;
+          const edge = 0.25 + 0.75 * Math.sqrt(nvc);                // 輪郭に近いほど暗く（丸みが出る）
+          let h = nh > 0 ? nh : 0; h *= h; h *= h;                  // h^4: 広くて弱いつや
+          const spec = 28 * h;
+          // リムライト: 輪郭すれすれの面に、その場所の色を明るくした光が回る
+          let fr = 1 - nvc; fr = fr * fr * (0.4 + 0.6 * fr);
+          const m = lit * edge, rk = 0.85 * fr;
+          let r = CT[co] * m + (CT[co] * 1.2 + 60) * rk + spec,
+              gg = CT[co + 1] * m + (CT[co + 1] * 1.2 + 60) * rk + spec,
+              b = CT[co + 2] * m + (CT[co + 2] * 1.2 + 60) * rk + spec;
           const cov = Math.min(1, rj - adx + 0.5);
           if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; gg = BG[1] + (gg - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
           const c = pack(r, gg, b);
@@ -263,6 +275,8 @@
       }
     }
     ctx.putImageData(img, 0, 0, clear.x0, clear.y0, clear.x1 - clear.x0, clear.y1 - clear.y0);
+    gctx.clearRect(0, 0, gv.width, gv.height);
+    gctx.drawImage(cv, 0, 0, gv.width, gv.height);
     prevBox = box;
   }
 
