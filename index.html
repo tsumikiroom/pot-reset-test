@@ -10,7 +10,7 @@
          font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
   /* にじみ: 壺だけを小さく写してぼかし、明るく重ねる（輪郭から色がにじむ） */
-  #g { pointer-events: none; filter: blur(16px); mix-blend-mode: screen; opacity: .7; }
+  #g { pointer-events: none; filter: blur(16px); mix-blend-mode: screen; opacity: .35; }
   #hint { position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 28px); text-align: center;
           color: #c3c8d3; font-size: 14px; letter-spacing: .08em; pointer-events: none; transition: opacity .6s; }
   #swatches { position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 22px);
@@ -255,12 +255,13 @@
           const edge = 0.25 + 0.75 * Math.sqrt(nvc);                // 輪郭に近いほど暗く（丸みが出る）
           let h = nh > 0 ? nh : 0; h *= h; h *= h;                  // h^4: 広くて弱いつや
           const spec = 28 * h;
-          // リムライト: 輪郭すれすれの面に、その場所の色を明るくした光が回る
-          let fr = 1 - nvc; fr = fr * fr * (0.4 + 0.6 * fr);
-          const m = lit * edge, rk = 0.85 * fr;
-          let r = CT[co] * m + (CT[co] * 1.2 + 60) * rk + spec,
-              gg = CT[co + 1] * m + (CT[co + 1] * 1.2 + 60) * rk + spec,
-              b = CT[co + 2] * m + (CT[co + 2] * 1.2 + 60) * rk + spec;
+          // リムライト（フレネル）: 視線に対して面が寝ているほど（輪郭に近いほど）、
+          // 下の色をリムの色（その場所の色を白へ半分寄せたもの。255 を超えない）へ置きかえる
+          let fr = 1 - nvc; fr = 0.95 * fr * Math.sqrt(fr);   // (1 - N·V)^1.5
+          const m = lit * edge, km = 1 - fr;
+          let r = (CT[co] * m + spec) * km + (CT[co] + (255 - CT[co]) * 0.5) * fr,
+              gg = (CT[co + 1] * m + spec) * km + (CT[co + 1] + (255 - CT[co + 1]) * 0.5) * fr,
+              b = (CT[co + 2] * m + spec) * km + (CT[co + 2] + (255 - CT[co + 2]) * 0.5) * fr;
           const cov = Math.min(1, rj - adx + 0.5);
           if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; gg = BG[1] + (gg - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
           const c = pack(r, gg, b);
