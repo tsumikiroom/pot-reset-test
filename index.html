@@ -158,6 +158,12 @@
     for (let i = m; i < n; i++) { IA[i - removed + 1] = IA[i]; IB[i - removed + 1] = IB[i]; }
     return n - removed + 1;
   }
+  // 口のふち（玉縁）用: 列ごとの「その画素に描いた輪の高さ」
+  let LH = new Float32Array(0), LA = 0, LRC = 0, LBASE = 0, LLEN = 0;
+  function markLip(ya, yb, h) {          // 画素の中心が ya〜yb に入るものに高さ h を記録
+    const p1 = Math.min(LLEN - 1, Math.floor(yb - 0.5 - LBASE));
+    for (let p = Math.max(0, Math.ceil(ya - 0.5 - LBASE)); p <= p1; p++) LH[p] = h;
+  }
   const CN = 768, CK = CN / 1.5, CT = new Float32Array(CN * 3), RT = new Float32Array(CN * 3);
   // 計算を軽くする表: asin(x)×1.5 と sin
   const AN = 2048, ASIN15 = new Float32Array(AN);
@@ -205,12 +211,16 @@
     }
 
     const box = { x0: Math.max(0, Math.floor(cx * S - maxR) - 2), x1: Math.min(cw, Math.ceil(cx * S + maxR) + 2),
-                  y0: Math.max(0, Math.floor(top * S - K * maxR) - 2), y1: Math.min(chh, Math.ceil(bottom * S + K * maxR) + 2) };
+                  y0: Math.max(0, Math.floor(top * S - K * maxR - SR[0] * RIM * 0.5) - 2), y1: Math.min(chh, Math.ceil(bottom * S + K * maxR) + 2) };
     const clear = prevBox ? { x0: Math.min(box.x0, prevBox.x0), x1: Math.max(box.x1, prevBox.x1), y0: Math.min(box.y0, prevBox.y0), y1: Math.max(box.y1, prevBox.y1) } : box;
     for (let y = clear.y0; y < clear.y1; y++) buf.fill(pBG, y * cw + clear.x0, y * cw + clear.x1);
 
     const pcx = cx * S, Y0 = top * S;
     const r0 = SR[0], ri = r0 * (1 - RIM);
+    // ふちの玉縁: 断面の半円の半径 LA と、その中心の半径 LRC
+    LA = (r0 - ri) / 2; LRC = (r0 + ri) / 2;
+    LBASE = Math.floor(Y0 - LA - K * r0) - 2; LLEN = Math.ceil(2 * K * r0 + LA) + 6;
+    if (LH.length < LLEN) LH = new Float32Array(LLEN);
     const topC = [0, 0, 0], MOUTH_CO = ((0.25 * CK) | 0) * 3;   // 口の高さ（g = 0）の色の位置
     colorAt(0, topC, 0);
     for (let i = 0; i < CN; i++) colorAt(i / CK - 0.25, CT, i * 3);   // 高さ → 色 の表
@@ -223,38 +233,52 @@
       const dx = px + 0.5 - pcx, adx = Math.abs(dx);
       let n = 0;                               // この列でもう塗った範囲（上から順の区間、IA〜IB）の数
 
-      // 口（いちばん上の輪切り）: ふちと、中の暗がり
+      // 口: 中の暗がりと、丸いふち。ふちは断面が半円の「玉縁」で、胴の上端より少し盛り上がる。
+      // 半円を高さごとの薄い輪（だ円の帯）に分け、低い輪から順に描いて、高い輪が上に来るようにする。
+      // この列で、各画素に最後に描いた輪の高さを LH に記録し、あとでまとめて色をつける
       if (adx < r0 + 0.5) {
-        const s0 = Math.sqrt(Math.max(0, r0 * r0 - dx * dx));
-        const si = adx < ri ? Math.sqrt(ri * ri - dx * dx) : -1;
         const cov = Math.min(1, r0 - adx + 0.5);
-        const ya = Y0 - K * s0, yb = Y0 + K * s0;
-        for (let py = Math.max(box.y0, Math.ceil(ya - 0.5)); py + 0.5 <= yb && py < box.y1; py++) {
+        LH.fill(-1, 0, LLEN);
+        let ytop = 1e9;
+        for (let h = 0; h <= LA + 1e-6; h += 0.5) {
+          const s = Math.sqrt(Math.max(0, LA * LA - h * h)), ro = LRC + s, rin = LRC - s;
+          if (adx >= ro) continue;
+          const so = K * Math.sqrt(ro * ro - dx * dx), Yc = Y0 - h;
+          if (Yc - so < ytop) ytop = Yc - so;
+          if (adx < rin) {
+            const si = K * Math.sqrt(rin * rin - dx * dx);
+            markLip(Yc - so, Yc - si, h); markLip(Yc + si, Yc + so, h);
+          } else markLip(Yc - so, Yc + so, h);
+        }
+        const siI = adx < ri ? K * Math.sqrt(ri * ri - dx * dx) : -1;   // 中（胴の上端の高さで見える口の内側）
+        const yb = Y0 + K * Math.sqrt(Math.max(0, r0 * r0 - dx * dx));
+        let lastH = LA;
+        for (let py = Math.max(box.y0, Math.ceil(ytop - 0.5)); py + 0.5 <= yb && py < box.y1; py++) {
           const y = py + 0.5;
+          let h = LH[py - LBASE];
+          const inside = siI >= 0 && y > Y0 - siI && y < Y0 + siI;
+          if (h < 0 && !inside) h = lastH;      // 輪と輪のすき間に落ちた画素は、すぐ上の画素の高さを使う
           let r, g, b;
-          // 粒: 口を真上から見た角度と、中心からの距離で決める（回転と一緒に回る）
-          const zz = (y - Y0) / K, rr = Math.sqrt(dx * dx + zz * zz);
+          // 粒: 真上から見た角度と、中心からの距離で決める（回転と一緒に回る）
+          const zz = (y - Y0 + (h > 0 ? h : 0)) / K, rr = Math.sqrt(dx * dx + zz * zz) || 1;
           const gn = GRAIN[(((rr * 0.5) | 0) & (GH - 1)) * GW + ((((Math.atan2(dx, zz) + phase) * GK) | 0) & (GW - 1))];
-          if (si >= 0 && y > Y0 - K * si && y < Y0 + K * si) {
+          if (h < 0) {
             // 中: 手前の壁の内側ほど少し暗い（最大で2割）
-            const f = (y - (Y0 - K * si)) / (2 * K * si);
+            const f = (y - (Y0 - siI)) / (2 * siI);
             const lv = 0.8 + 0.2 * (1 - f) * (1 - f);
             r = topC[0] * lv; g = topC[1] * lv; b = topC[2] * lv;
           } else {
-            // ふち: 面取りして丸く。ふちの幅の中で、面の向きが内向き → 上 → 外向きへ回る
-            const z = (y - Y0) / K, rho = Math.sqrt(dx * dx + z * z) || 1;
-            let u = (rho - ri) / (r0 - ri); u = u < 0 ? 0 : u > 1 ? 1 : u;
-            const th = (2 * u - 1) * 1.45, st = Math.sin(th);
-            const ct = Math.cos(th);
-            // 横の向き: 上向き〜外向きの所は手前ほど正面、内向き（口の内側へ落ちる所）は奥向き
-            shade(st * dx / rho, ct, st * z / rho, Math.min(1, ct + st) * z / rho, MOUTH_CO);
+            lastH = h;
+            // 面の向き: 半円の中心から見た向き。外側は外向き、てっぺんは上向き、内側は内向き
+            const q = rr - LRC, ln = Math.sqrt(q * q + h * h) || 1, ct = h / ln, st = q / ln;
+            shade(st * dx / rr, ct, st * zz / rr, Math.min(1, ct + st) * zz / rr, MOUTH_CO);
             r = OUT[0]; g = OUT[1]; b = OUT[2];
           }
           r += gn; g += gn; b += gn;
           if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; g = BG[1] + (g - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
           buf[py * cw + px] = pack(r, g, b);
         }
-        if (cov >= 1) { IA[0] = ya; IB[0] = yb; n = 1; }
+        if (cov >= 1) { IA[0] = ytop; IB[0] = yb; n = 1; }
       }
 
       // 胴: 上から下へ。各輪切りは、まだ塗っていない所だけが見える
