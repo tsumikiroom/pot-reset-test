@@ -48,6 +48,12 @@
   const L = norm([-0.45, 0.65, 0.6]), V = [0, K, KC], HV = norm([L[0] + V[0], L[1] + V[1], L[2] + V[2]]);
   // 回転: 色の帯が表面ごと少し回って見える。SPIN は1秒あたりの回転量、SWIRL はその強さ
   const SPIN = 1.6, SWIRL = 0.07;
+  // 表面に貼りついた粒（グレイン）。回転と一緒に流れて、回っている感じを出す。
+  // GW = 1周あたりの粒の数、GAMP = 粒の明暗の強さ（0〜255）
+  const GW = 1024, GH = 512, GAMP = 22;
+  const GRAIN = new Float32Array(GW * GH);
+  for (let i = 0; i < GW * GH; i++) GRAIN[i] = (Math.random() + Math.random() - 1) * GAMP;
+  const GK = GW / (2 * Math.PI);
 
   const cv = document.getElementById('c');
   const ctx = cv.getContext('2d');
@@ -226,6 +232,9 @@
         for (let py = Math.max(box.y0, Math.ceil(ya - 0.5)); py + 0.5 <= yb && py < box.y1; py++) {
           const y = py + 0.5;
           let r, g, b;
+          // 粒: 口を真上から見た角度と、中心からの距離で決める（回転と一緒に回る）
+          const zz = (y - Y0) / K, rr = Math.sqrt(dx * dx + zz * zz);
+          const gn = GRAIN[(((rr * 0.5) | 0) & (GH - 1)) * GW + ((((Math.atan2(dx, zz) + phase) * GK) | 0) & (GW - 1))];
           if (si >= 0 && y > Y0 - K * si && y < Y0 + K * si) {
             // 中: 手前の壁の内側ほど少し暗い（最大で2割）
             const f = (y - (Y0 - K * si)) / (2 * K * si);
@@ -241,6 +250,7 @@
             shade(st * dx / rho, ct, st * z / rho, Math.min(1, ct + st) * z / rho, MOUTH_CO);
             r = OUT[0]; g = OUT[1]; b = OUT[2];
           }
+          r += gn; g += gn; b += gn;
           if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; g = BG[1] + (g - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
           buf[py * cw + px] = pack(r, g, b);
         }
@@ -272,11 +282,14 @@
           const d = SD[j], il = 1 / Math.sqrt(1 + d * d);
           const nx = sp * il, ny = d * il, nz = cp * il;
           // 色: 高さで3色。回転に合わせて色の帯が少し横へ流れる
-          const sw = SIN[((ASIN15[((sp + 1) * 0.5 * (AN - 1)) | 0] + phase) * SK) & SM];
+          const ang = ASIN15[((sp + 1) * 0.5 * (AN - 1)) | 0];   // 回転体の角度×1.5
+          const sw = SIN[((ang + phase) * SK) & SM];
           const ci = (((j / Ls + SWIRL * sw) + 0.25) * CK) | 0;   // 色の表は g = -0.25〜1.25
           const co = (ci < 0 ? 0 : ci >= CN ? CN - 1 : ci) * 3;
           shade(nx, ny, nz, cp, co);
-          let r = OUT[0], gg = OUT[1], b = OUT[2];
+          // 粒: 表面の角度（回転で流れる）と高さで決める。輪郭に近いほど粒が横につぶれて、回り込みが見える
+          const gn = GRAIN[((((j + 400) >> 1) & (GH - 1)) * GW) + ((((ang / 1.5 + phase) * GK) | 0) & (GW - 1))];
+          let r = OUT[0] + gn, gg = OUT[1] + gn, b = OUT[2] + gn;
           const cov = Math.min(1, rj - adx + 0.5);
           if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; gg = BG[1] + (gg - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
           const c = pack(r, gg, b);
