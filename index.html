@@ -14,7 +14,7 @@
   #hint { position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 28px); text-align: center;
           color: #c3c8d3; font-size: 14px; letter-spacing: .08em; pointer-events: none; transition: opacity .6s; }
   #swatches { position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 22px);
-              display: flex; justify-content: center; gap: 14px; }
+              display: flex; justify-content: center; gap: 10px; }
   #swatches button { width: 26px; height: 26px; border-radius: 50%; border: 0; padding: 0; cursor: pointer;
                      outline: 2px solid transparent; outline-offset: 3px; }
   #swatches button.on { outline-color: #c3c8d3; }
@@ -27,15 +27,19 @@
 <div id="swatches"></div>
 <script>
 (() => {
-  // 色の組み合わせ（口 → 胴 → 底 の3色を高さでつなぐ）
+  // 色の組み合わせ。c = 正面の色（口 → 胴 → 底 の3色を高さでつなぐ）、
+  // r = リムの色（輪郭寄りを置きかえる色。上 → 下 の2色）。参考の9つの壺から読み取った
   const PRESETS = [
-    ['#5b4dff', '#e3a9e6', '#c0603f'],  // 青紫 → ラベンダー → 赤茶
-    ['#d8141c', '#ffd03a', '#ffffff'],  // 赤 → 黄 → 白
-    ['#0a1238', '#1c2f93', '#4a9bff'],  // 紺 → 青 → 明るい青
-    ['#2fc22a', '#f0aee9', '#e9a5e4'],  // 緑 → ピンク
-    ['#8c8c8c', '#f4f4f4', '#c9c9c9'],  // グレー → 白
-    ['#0e0e0e', '#4a4a4a', '#f0f0f0'],  // 黒 → 白
-  ].map(p => p.map(hex));
+    { c: ['#a99bff', '#f4c3f0', '#c2603e'], r: ['#5a48ff', '#5a3cff'] },  // ラベンダー × 青紫のリム、底は赤茶
+    { c: ['#c80012', '#ffc81e', '#ffffff'], r: ['#ff3a10', '#fff4c8'] },  // 赤 → 黄 → 白
+    { c: ['#000006', '#020418', '#2a64ff'], r: ['#0a2aa8', '#3c8cff'] },  // 黒い芯 × 青いリム
+    { c: ['#7a0006', '#8c000c', '#a0101c'], r: ['#e040c8', '#3ce0e8'] },  // 暗い赤 × マゼンタ〜シアンのリム
+    { c: ['#18c818', '#f6c4f0', '#eab0e8'], r: ['#0a6a0a', '#e888e0'] },  // 緑の口 → ピンク
+    { c: ['#5c5c5c', '#7c7c7c', '#cfcfcf'], r: ['#f2f2f2', '#ffffff'] },  // 灰の芯 × 白いリム
+    { c: ['#ff2a78', '#a8f0e0', '#c8f4ec'], r: ['#ff1050', '#ff2a8a'] },  // ミント × 濃いピンクのリム
+    { c: ['#b4b4b4', '#9a9a9a', '#d8d8d8'], r: ['#101010', '#202020'] },  // 灰 × 黒いリム
+    { c: ['#ff7a1a', '#ff6a10', '#ff8a30'], r: ['#5a40d8', '#7a50ff'] },  // オレンジ × 紫のリム
+  ].map(p => ({ c: p.c.map(hex), r: p.r.map(hex) }));
   const BG = hex('#5b6376');
   const N = 160;                 // 輪郭の分割数（高さ方向）
   const radius = new Float32Array(N);
@@ -153,7 +157,7 @@
     for (let i = m; i < n; i++) { IA[i - removed + 1] = IA[i]; IB[i - removed + 1] = IB[i]; }
     return n - removed + 1;
   }
-  const CN = 768, CK = CN / 1.5, CT = new Float32Array(CN * 3);
+  const CN = 768, CK = CN / 1.5, CT = new Float32Array(CN * 3), RT = new Float32Array(CN * 3);
   // 計算を軽くする表: asin(x)×1.5 と sin
   const AN = 2048, ASIN15 = new Float32Array(AN);
   for (let i = 0; i < AN; i++) ASIN15[i] = 1.5 * Math.asin(i / (AN - 1) * 2 - 1);
@@ -161,7 +165,7 @@
   for (let i = 0; i < SN; i++) SIN[i] = Math.sin(i / SK);
   function colorAt(g, out, o) {  // 高さ g（0 = 口、1 = 底）の色を3色からなめらかに作る
     g = g < 0 ? 0 : g > 1 ? 1 : g;
-    const a = g < 0.5 ? preset[0] : preset[1], b = g < 0.5 ? preset[1] : preset[2];
+    const P = preset.c, a = g < 0.5 ? P[0] : P[1], b = g < 0.5 ? P[1] : P[2];
     let t = g < 0.5 ? g * 2 : g * 2 - 1;
     t = t * t * (3 - 2 * t);
     for (let k = 0; k < 3; k++) out[o + k] = a[k] + (b[k] - a[k]) * t;
@@ -188,6 +192,10 @@
     const topC = [0, 0, 0];
     colorAt(0, topC, 0);
     for (let i = 0; i < CN; i++) colorAt(i / CK - 0.25, CT, i * 3);   // 高さ → 色 の表
+    for (let i = 0; i < CN; i++) {                                     // 高さ → リムの色 の表
+      let g = i / CK - 0.25; g = g < 0 ? 0 : g > 1 ? 1 : g;
+      for (let k = 0; k < 3; k++) RT[i * 3 + k] = preset.r[0][k] + (preset.r[1][k] - preset.r[0][k]) * g;
+    }
 
     for (let px = box.x0; px < box.x1; px++) {
       const dx = px + 0.5 - pcx, adx = Math.abs(dx);
@@ -248,20 +256,21 @@
           const sw = SIN[((ASIN15[((sp + 1) * 0.5 * (AN - 1)) | 0] + phase) * SK) & SM];
           const ci = (((j / Ls + SWIRL * sw) + 0.25) * CK) | 0;   // 色の表は g = -0.25〜1.25
           const co = (ci < 0 ? 0 : ci >= CN ? CN - 1 : ci) * 3;
-          // マット: 光は裏側まで回り込ませ（やわらかい陰）、つやは広くぼんやり
+          // マット: 光はほぼ均一（陰はうっすら）。つやは広く弱く
           let w = (nl + 0.5) / 1.5; w = w > 0 ? w : 0;
-          const lit = 0.22 + 0.9 * w * w;
+          const m = 0.72 + 0.38 * w;
           const nvc = nv > 0 ? nv : 0;
-          const edge = 0.25 + 0.75 * Math.sqrt(nvc);                // 輪郭に近いほど暗く（丸みが出る）
-          let h = nh > 0 ? nh : 0; h *= h; h *= h;                  // h^4: 広くて弱いつや
-          const spec = 28 * h;
-          // リムライト（フレネル）: 視線に対して面が寝ているほど（輪郭に近いほど）、
-          // 下の色をリムの色（その場所の色を白へ半分寄せたもの。255 を超えない）へ置きかえる
-          let fr = 1 - nvc; fr = 0.95 * fr * Math.sqrt(fr);   // (1 - N·V)^1.5
-          const m = lit * edge, km = 1 - fr;
-          let r = (CT[co] * m + spec) * km + (CT[co] + (255 - CT[co]) * 0.5) * fr,
-              gg = (CT[co + 1] * m + spec) * km + (CT[co + 1] + (255 - CT[co + 1]) * 0.5) * fr,
-              b = (CT[co + 2] * m + spec) * km + (CT[co + 2] + (255 - CT[co + 2]) * 0.5) * fr;
+          let h = nh > 0 ? nh : 0; h *= h; h *= h;
+          const spec = 14 * h;
+          // リム（フレネル）: 正面から輪郭へ向かって、別の色（リムの色）へ置きかえていく。
+          // 幅は広く、正面のすぐ外から始まり、輪郭ではほぼリムの色だけになる
+          // 下を向いた面（胴のふくらみの下）までリム一色にならないよう、横の向き（cp）も半分まぜる
+          const nf = 0.55 * nvc + 0.45 * cp;
+          let t = (1 - nf - 0.06) / 0.62; t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const fr = t * t * (3 - 2 * t), km = 1 - fr;
+          let r = (CT[co] * m + spec) * km + RT[co] * fr,
+              gg = (CT[co + 1] * m + spec) * km + RT[co + 1] * fr,
+              b = (CT[co + 2] * m + spec) * km + RT[co + 2] * fr;
           const cov = Math.min(1, rj - adx + 0.5);
           if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; gg = BG[1] + (gg - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
           const c = pack(r, gg, b);
@@ -294,7 +303,7 @@
   const css = c => `rgb(${c.join(',')})`;
   PRESETS.forEach(p => {
     const b = document.createElement('button');
-    b.style.background = `linear-gradient(180deg, ${css(p[0])}, ${css(p[1])}, ${css(p[2])})`;
+    b.style.background = `radial-gradient(circle, ${css(p.c[1])} 30%, ${css(p.r[1])} 75%)`;
     b.setAttribute('aria-label', '色');
     b.onclick = () => { preset = p; mark(); };
     sw.appendChild(b);
