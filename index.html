@@ -83,7 +83,7 @@ button {
       <text x="292" y="124" text-anchor="end" stroke="none">pull</text>
       <text x="200" y="4" stroke="none">spin</text>
     </svg>
-    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. Tilt the phone to look at it from above, below or the side. Press and hold, then swipe to throw it: it bounces, breaks, and a new one drops in. The colours are picked at random each time.</p>
+    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. Tilt the phone to look at it from above, below or the side. Shake the phone, or press and hold and then swipe, to throw it: it bounces, breaks, and a new one drops in. The colours are picked at random each time.</p>
     <div class="choose">
       <button id="go"><span>Start</span><span aria-hidden="true">&rarr;</span></button>
     </div>
@@ -138,9 +138,6 @@ const canvas = document.getElementById('c');
 const hint = document.getElementById('hint');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setClearColor(0x000000, 0);
-// ドロップシャドウ: ほぼ真上（少し左手前）からの光で、壺が立っている床に、ぼかした影を落とす（影だけが見える透明な面）
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.VSMShadowMap;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 60);
 
@@ -300,18 +297,48 @@ const potGroup = new THREE.Group();             // 位置・傾き（投げた�
 const potMesh = new THREE.Mesh(potGeo, potMat); // ろくろの回転
 potMesh.frustumCulled = false;
 potGroup.add(potMesh); scene.add(potGroup);
-potMesh.castShadow = true;
-const sun = new THREE.DirectionalLight(0xffffff, 1);
-sun.position.set(-0.9, 3.2, 1.4); sun.target.position.set(0, -0.5, 0);
-sun.castShadow = true;
-sun.shadow.mapSize.set(1024, 1024);
-sun.shadow.radius = 10; sun.shadow.blurSamples = 16;  // 影のぼかし
-sun.shadow.bias = -0.0005;
-scene.add(sun, sun.target);
-const shadowMat = new THREE.ShadowMaterial({ opacity: 0.16 });
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), shadowMat);     // 床（影を受けるだけ。下から見ると見えない）
-ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true;
-scene.add(ground);
+// ---- ドロップシャドウ（床に置く、ぼかした楕円の影） ----
+// 光の計算で影を作る方式（シャドウマップ）は、破片が重なったときに影がおかしく伸びたのでやめ、
+// 床に「ぼかした楕円」を置く。床から離れるほど広がって薄くなる。影は少し右奥へずらす（光は左上手前から）
+const blobTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(0.45, 'rgba(0,0,0,0.55)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+})();
+const blobGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+function makeBlob() {
+  const m = new THREE.Mesh(blobGeo, new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false, opacity: 0 }));
+  m.renderOrder = -1; m.frustumCulled = false; scene.add(m); return m;
+}
+const SH_OFF = new THREE.Vector3(0.13, 0, 0.0);     // 影のずれ（右へ。奥へずらすと壺の後ろに隠れる）
+const potBlobWide = makeBlob(), potBlobContact = makeBlob();
+// 影を置く: 中心 (x, z)、床からの高さ h、大きさ r（半径）、濃さ a
+function placeBlob(m, x, z, h, rx, rz, a) {
+  const k = 1 + h * 0.9, f = Math.exp(-h * 1.8);
+  if (h < -0.05) { m.visible = false; return; }  // 床より下（抜け落ちた破片）は影なし
+  m.visible = true;
+  m.position.set(x + SH_OFF.x * (1 + h), floorY + 0.002, z + SH_OFF.z * (1 + h));
+  m.scale.set(rx * 2 * k, 1, rz * 2 * k);
+  m.material.opacity = a * f;
+}
+function updateShadows() {
+  const show = potGroup.visible;
+  potBlobWide.visible = potBlobContact.visible = show;
+  if (show) {
+    let rm = 0; for (let i = 0; i < N; i++) rm = Math.max(rm, radius[i]);
+    const rb = rAt(1), p = potGroup.position;
+    const h = Math.max(0, p.y - 0.5 - floorY);   // 壺の底の、床からの高さ（立てた向きのとき）
+    placeBlob(potBlobWide, p.x, p.z, h, rm * 1.55, rm * 1.15, 0.24);
+    placeBlob(potBlobContact, p.x - SH_OFF.x * 0.5, p.z - SH_OFF.z * 0.5, h * 1.5, rb * 1.15, rb * 0.9, 0.3);
+  }
+  for (const s of shards) {
+    const b = s.body.position;
+    placeBlob(s.blob, b.x, b.z, Math.max(0, b.y - floorY - s.rad * 0.3), s.rad * 1.1, s.rad * 1.0, 0.26);
+    if (b.y < floorY - 0.05) s.blob.visible = false;
+  }
+}
 
 // ---- 物理（cannon-es） ----
 const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -G, 0) });
@@ -321,13 +348,17 @@ const mWall = new CANNON.Material('wall'), mPot = new CANNON.Material('pot'), mS
 world.addContactMaterial(new CANNON.ContactMaterial(mWall, mPot, { friction: 0.3, restitution: 0.55 }));
 world.addContactMaterial(new CANNON.ContactMaterial(mWall, mShard, { friction: 0.5, restitution: 0.25 }));
 world.addContactMaterial(new CANNON.ContactMaterial(mShard, mShard, { friction: 0.6, restitution: 0.15 }));
-let walls = [], floorBody = null, floorY = -1, ceilY = 1, halfW = 0.5, halfD = 0.7;
+let walls = [], floorBody = null, floorY = -1, ceilY = 1, halfW = 0.5, halfD = 0.7, frontD = 0.42;
 function buildArena() {                          // 画面の見える範囲を囲む箱（床・天井・左右・前後）
   for (const b of walls) world.removeBody(b);
   walls = [];
   // 床は壺の底の高さ（壺は床に立っていて、割れた破片もこの床に落ちてたまる）
-  halfW = VIS_H * aspect / 2; floorY = -0.5; ceilY = TARGET.y + VIS_H / 2;
-  halfD = Math.max(0.7, rMax + 0.15);            // 前後の壁（広い画面で太い壺が壁にめり込まないように）
+  // 箱は画面に映る範囲に合わせる。手前ほど映る幅が狭い（遠近）ので、手前の壁は壺のすぐ前に置き、
+  // 左右の壁は手前の壁の所で映る幅に合わせる（画面の外に転がった破片の影だけが映るのを防ぐ）
+  floorY = -0.5; ceilY = TARGET.y + VIS_H / 2;
+  frontD = Math.max(0.42, rMax + 0.05);
+  halfD = Math.max(0.7, rMax + 0.15);            // 奥の壁
+  halfW = Math.max(VIS_H * aspect / 2 * (DIST - frontD) / DIST, rMax + 0.02);
   const add = (n, p) => {
     const b = new CANNON.Body({ mass: 0, material: mWall, shape: new CANNON.Plane() });
     b.quaternion.setFromVectors(new CANNON.Vec3(0, 0, 1), new CANNON.Vec3(...n));
@@ -336,12 +367,7 @@ function buildArena() {                          // 画面の見える範囲を�
   if (!draining) floorBody = add([0, 1, 0], [0, floorY, 0]);   // 破片が抜け落ちている間は床を戻さない
   add([0, -1, 0], [0, ceilY, 0]);
   add([1, 0, 0], [-halfW, 0, 0]); add([-1, 0, 0], [halfW, 0, 0]);
-  add([0, 0, 1], [0, 0, -halfD]); add([0, 0, -1], [0, 0, halfD]);
-  // 影を受ける面と、影を作る範囲を箱に合わせる
-  ground.position.set(0, floorY, 0); ground.scale.set(halfW * 2, halfD * 2, 1);   // 箱の床の広さだけ
-  const sc = sun.shadow.camera, ext = Math.max(halfW, halfD, VIS_H / 2) * 1.8;
-  sc.left = -ext; sc.right = ext; sc.top = ext; sc.bottom = -ext; sc.near = 0.5; sc.far = 12;
-  sc.updateProjectionMatrix();
+  add([0, 0, 1], [0, 0, -halfD]); add([0, 0, -1], [0, 0, frontD]);
 }
 // 点の集まりの凸包を、cannon の当たり判定の形にする
 function convexShape(points) {
@@ -492,7 +518,8 @@ function fracture(impact) {                      // impact: 壺の中での、�
 let mode = 'shape', grab = null, potBody = null, flyT = 0, hits = 0, lastHit = -1, lastImpact = null, breakNow = false;
 let shards = [], restT = 0, waitT = 0, draining = false, dropV = 0, spin = 0, shardMat = null;
 
-function throwPot(vx, vy) {                      // vx, vy: 画面の上で指が動いた速さ（px/秒）
+let fragile = false;                             // 振って飛ばしたとき: 最初にぶつかった所で割れる
+function throwPot(vx, vy, brittle = false) {     // vx, vy: 画面の上で指が動いた速さ（px/秒）
   const ppu = H / VIS_H;
   const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
   const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
@@ -518,10 +545,10 @@ function throwPot(vx, vy) {                      // vx, vy: 画面の上で指�
     const c = e.contact, pt = new CANNON.Vec3();
     if (c.bi === potBody) potBody.position.vadd(c.ri, pt); else potBody.position.vadd(c.rj, pt);
     lastImpact = pt;
-    if (hits >= 3 || iv > 9) breakNow = true;      // 3回ぶつかるか、強くぶつかったら割れる
+    if (hits >= 3 || iv > 4 || fragile) breakNow = true;   // 3回ぶつかるか、強くぶつかったら割れる（床が足元にあるので落差は小さい）
   });
   world.addBody(potBody);
-  flyT = 0; hits = 0; lastHit = -1; breakNow = false; lastImpact = null;
+  flyT = 0; hits = 0; lastHit = -1; breakNow = false; lastImpact = null; fragile = brittle;
   mode = 'fly';
 }
 function shatter() {
@@ -544,7 +571,8 @@ function shatter() {
     geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nor), 3));
     geo.setAttribute('aOrig', new THREE.BufferAttribute(new Float32Array(pos), 3));
     geo.setAttribute('aType', new THREE.BufferAttribute(new Float32Array(typ), 1));
-    const mesh = new THREE.Mesh(geo, shardMat); mesh.frustumCulled = false; mesh.castShadow = true;
+    const mesh = new THREE.Mesh(geo, shardMat); mesh.frustumCulled = false;
+    geo.computeBoundingSphere();
     const body = new CANNON.Body({ mass: pc.mass, material: mShard });
     const ball = new CANNON.Sphere(T * 0.6);
     for (const q of pc.balls) body.addShape(ball, new CANNON.Vec3(q.x - cx, q.y - cy, q.z - cz));
@@ -558,7 +586,7 @@ function shatter() {
     body.velocity.set(v.x * 0.6 + away.x + (Math.random() - 0.5) * 0.4, v.y * 0.6 + away.y + Math.random() * 0.6, v.z * 0.6 + away.z + (Math.random() - 0.5) * 0.4);
     body.angularVelocity.set(potBody.angularVelocity.x + (Math.random() - 0.5) * 8, potBody.angularVelocity.y + (Math.random() - 0.5) * 8, potBody.angularVelocity.z + (Math.random() - 0.5) * 8);
     world.addBody(body); scene.add(mesh);
-    shards.push({ body, mesh });
+    shards.push({ body, mesh, blob: makeBlob(), rad: geo.boundingSphere.radius });
   }
   world.removeBody(potBody); potBody = null;
   potGroup.visible = false;
@@ -570,7 +598,7 @@ function stepShards(dt) {
   if (draining) {                                // 抜け落ちる: 床が無いので画面の下へ。外へ出たら消す
     shards = shards.filter(s => {
       if (s.body.position.y > floorY - 2.5) return true;
-      world.removeBody(s.body); scene.remove(s.mesh); s.mesh.geometry.dispose(); return false;
+      world.removeBody(s.body); scene.remove(s.mesh, s.blob); s.mesh.geometry.dispose(); s.blob.material.dispose(); return false;
     });
     if (!shards.length) { draining = false; buildArena(); }
     return;
@@ -644,7 +672,7 @@ canvas.addEventListener('pointermove', e => {
     // 壺が箱（床・天井・壁）にめり込まないよう、中心を「半分の高さ・いちばん太い半径」ぶん内側に収める
     let rm = 0; for (let i = 0; i < N; i++) rm = Math.max(rm, radius[i]);
     const cl = (v, lo, hi) => lo > hi ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, v));
-    potGroup.position.set(cl(w.x, -halfW + rm, halfW - rm), cl(w.y, floorY + 0.5, ceilY - 0.52), cl(w.z, -halfD + rm, halfD - rm));
+    potGroup.position.set(cl(w.x, -halfW + rm, halfW - rm), cl(w.y, floorY + 0.5, ceilY - 0.52), cl(w.z, -halfD + rm, frontD - rm));
     const t = performance.now();
     grab.hist.push({ x: e.clientX, y: e.clientY, t });
     while (grab.hist.length > 2 && t - grab.hist[0].t > 100) grab.hist.shift();
@@ -701,6 +729,41 @@ function updateView(dt) {
   camera.updateMatrixWorld();
 }
 
+// ---- 振ると割れる ----
+// 作っている途中にスマホを振ると、壺が振った向きへ飛ばされて、最初にぶつかった所で割れる。
+// 「振った」は、強い揺れ（SHAKE m/s² 以上）が 0.8 秒以内に向きを変えて2回来たとき（置いたときの1回の衝撃では割れない）
+const SHAKE = 13;
+let shakePeaks = [], gAvg = null;
+addEventListener('devicemotion', e => {
+  let a = e.acceleration;
+  if (!a || a.x == null) {                       // 重力を除いた値が無い端末: 重力込みの値から、ゆっくりした成分（重力）を引く
+    const g = e.accelerationIncludingGravity; if (!g || g.x == null) return;
+    if (!gAvg) gAvg = { x: g.x, y: g.y, z: g.z };
+    gAvg.x += (g.x - gAvg.x) * 0.1; gAvg.y += (g.y - gAvg.y) * 0.1; gAvg.z += (g.z - gAvg.z) * 0.1;
+    a = { x: g.x - gAvg.x, y: g.y - gAvg.y, z: g.z - gAvg.z };
+  }
+  const m = Math.hypot(a.x, a.y, a.z), t = performance.now();
+  if (m < SHAKE || (mode !== 'shape' && mode !== 'grab')) return;
+  shakePeaks = shakePeaks.filter(q => t - q.t < 800);
+  const last = shakePeaks[shakePeaks.length - 1];
+  if (last && t - last.t < 90) return;           // 同じ揺れの続き
+  shakePeaks.push({ t, x: a.x, y: a.y });
+  const prev = shakePeaks[shakePeaks.length - 2];
+  if (prev && prev.x * a.x + prev.y * a.y < 0) { // 向きが入れ替わった2回目 → 振った
+    shakePeaks = [];
+    if (mode === 'grab') { grab = null; }
+    for (const [, q] of pointers) clearTimeout(q.timer);
+    pointers.clear();
+    hint.classList.add('hide');
+    // 端末の x = 画面の右、y = 画面の上。揺れの強さに比例して飛ばす
+    const k = 150, sp = Math.hypot(a.x, a.y) || 1;
+    let vx = a.x * k, vy = -a.y * k;
+    if (sp * k < 1500) { const f = 1500 / (sp * k); vx *= f; vy *= f; }
+    if (navigator.vibrate) navigator.vibrate(20);
+    throwPot(vx, vy, true);
+  }
+});
+
 // ---- 毎フレーム ----
 let lastT = 0, paused = false, physMs = 0;   // paused / physMs は試験用（自分でコマを進める・物理の重さを測る）
 function frame(now) { if (!paused) step(now); requestAnimationFrame(frame); }
@@ -727,6 +790,7 @@ function step(now) {
   for (const s of shards) { s.mesh.position.copy(s.body.position); s.mesh.quaternion.copy(s.body.quaternion); }
   if (shards.length) stepShards(dt);
   if (shapeDirty) updatePotGeometry();
+  updateShadows();
   renderer.render(scene, camera);
 }
 
@@ -748,6 +812,9 @@ function layout() {
 document.getElementById('go').onclick = () => {
   if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
     DeviceOrientationEvent.requestPermission().catch(() => {});
+  }
+  if (window.DeviceMotionEvent && typeof DeviceMotionEvent.requestPermission === 'function') {
+    DeviceMotionEvent.requestPermission().catch(() => {});
   }
   document.getElementById('start').classList.add('hide');
   hint.classList.remove('hide');
