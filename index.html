@@ -16,6 +16,7 @@ html, body {
   font: 500 15px/1.3 "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; letter-spacing: -.01em;
 }
 canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#fx { pointer-events: none; }
 
 button {
   font: inherit; color: var(--ink); background: var(--paper); cursor: pointer; touch-action: manipulation;
@@ -58,6 +59,7 @@ button {
 </head>
 <body>
 <canvas id="c"></canvas>
+<canvas id="fx"></canvas>
 <div id="hint" class="hide">Push or pull the edge</div>
 
 <div id="start">
@@ -81,7 +83,7 @@ button {
       <text x="292" y="124" text-anchor="end" stroke="none">pull</text>
       <text x="200" y="4" stroke="none">spin</text>
     </svg>
-    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. The colours are picked at random each time.</p>
+    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. Press and hold, then swipe to throw it: it bounces, breaks, and a new one drops in. The colours are picked at random each time.</p>
     <div class="choose">
       <button id="go"><span>Start</span><span aria-hidden="true">&rarr;</span></button>
     </div>
@@ -124,11 +126,12 @@ button {
   const cv = document.getElementById('c');
   const ctx = cv.getContext('2d');
   const hint = document.getElementById('hint');
+  const fx = document.getElementById('fx'), fctx = fx.getContext('2d');   // 投げた壺と破片を描く層
   let W = 0, H = 0, S = 1;       // CSS px と描画倍率
   let img, buf;                  // 画面全体の画素
-  let top, bottom, cx, rMin, rMax;
-  // 色は開くたびにランダムで決まる（選ぶ手段は出さない）
-  const preset = PRESETS[Math.floor(Math.random() * PRESETS.length)];
+  let top, bottom, cx, rMin, rMax, potH, baseTop, baseCx;
+  // 色は開くたび・新しい壺が出るたびにランダムで決まる（選ぶ手段は出さない）
+  let preset = PRESETS[Math.floor(Math.random() * PRESETS.length)];
   let prevBox = null, phase = 0, lastT = 0;
 
   function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
@@ -143,18 +146,20 @@ button {
     const oldW = W;
     W = innerWidth; H = innerHeight;
     S = Math.min(devicePixelRatio || 1, 1.5);   // なめらかな陰影なので 1.5 倍で十分。重さを抑える
-    cv.width = Math.round(W * S); cv.height = Math.round(H * S);
+    cv.width = fx.width = Math.round(W * S); cv.height = fx.height = Math.round(H * S);
     img = ctx.createImageData(cv.width, cv.height);
     buf = new Uint32Array(img.data.buffer);
     buf.fill(0);                 // 背景は透明（ページの背景色が見える）
     prevBox = null;
-    const potH = Math.min(H * 0.55, W * 1.4);
-    top = H * 0.48 - potH / 2; bottom = top + potH;
-    cx = W / 2;
+    potH = Math.min(H * 0.55, W * 1.4);
+    top = baseTop = H * 0.48 - potH / 2; bottom = top + potH;
+    cx = baseCx = W / 2;
     rMin = W * 0.035; rMax = W * 0.44;
-    if (!oldW) radius.fill(Math.min(W * 0.2, potH * 0.3));          // 最初は筒
+    if (!oldW) radius.fill(cylR());                                  // 最初は筒
     else for (let i = 0; i < N; i++) radius[i] *= W / oldW;
   }
+
+  function cylR() { return Math.min(W * 0.2, potH * 0.3); }
 
   // 高さ y（CSS px、輪郭の真横の位置）での半径（線形補間）
   function rAt(y) {
@@ -181,25 +186,200 @@ button {
   }
 
   // ---- 指 ----
+  // mode: shape = 形を作る / grab = 長押しでつかんでいる / back = 元の位置へ戻る /
+  //       fly = 投げた壺が跳ね回る / shards = 割れた破片が落ちてたまる → 消える
+  let mode = 'shape', grab = null;
+  const HOLD_MS = 450, HOLD_MOVE = 8;          // 長押しの時間と、そのあいだ動いてもよい幅（px）
   const pointers = new Map();
   cv.addEventListener('pointerdown', e => {
+    if (mode !== 'shape') return;
     if (e.clientY < top - 40 || e.clientY > bottom + 40) return;
     try { cv.setPointerCapture(e.pointerId); } catch (_) {}
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const p = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, timer: 0 };
+    p.timer = setTimeout(() => startGrab(e.pointerId, p), HOLD_MS);
+    pointers.set(e.pointerId, p);
     hint.classList.add('hide');
   });
+  // 長押し: 指がほとんど動かないまま HOLD_MS たつと、壺をつかむ
+  function startGrab(id, p) {
+    if (mode !== 'shape' || p.moved || pointers.get(id) !== p) return;
+    mode = 'grab';
+    for (const [k, q] of pointers) if (k !== id) { clearTimeout(q.timer); pointers.delete(k); }
+    top -= 10; bottom = top + potH;              // 少し持ち上がる
+    grab = { id, offX: cx - p.x, offY: top - p.y, hist: [{ x: p.x, y: p.y, t: performance.now() }] };
+    if (navigator.vibrate) navigator.vibrate(12);
+  }
   cv.addEventListener('pointermove', e => {
     const p = pointers.get(e.pointerId);
     if (!p) return;
+    if (mode === 'grab') {
+      if (grab.id !== e.pointerId) return;
+      cx = e.clientX + grab.offX; top = e.clientY + grab.offY; bottom = top + potH;
+      const t = performance.now();
+      grab.hist.push({ x: e.clientX, y: e.clientY, t });
+      while (grab.hist.length > 2 && t - grab.hist[0].t > 100) grab.hist.shift();
+      return;
+    }
+    if (mode !== 'shape') return;
+    if (!p.moved && Math.hypot(e.clientX - p.x0, e.clientY - p.y0) > HOLD_MOVE) { p.moved = true; clearTimeout(p.timer); }
     // 押した瞬間の位置から「ふち」を動かす。指の横の移動量だけ、ふちが内／外へ動く
     const dx = Math.abs(e.clientX - cx) - Math.abs(p.x - cx);
     const y = Math.min(bottom, Math.max(top, e.clientY));
     push(y, rAt(y) + dx);
     p.x = e.clientX; p.y = e.clientY;
   });
-  const up = e => pointers.delete(e.pointerId);
+  const up = e => {
+    const p = pointers.get(e.pointerId);
+    if (p) clearTimeout(p.timer);
+    pointers.delete(e.pointerId);
+    if (mode === 'grab' && grab && grab.id === e.pointerId) {
+      // 最後の 0.1 秒の指の速さで投げる。ほとんど動いていなければ元の位置へ戻す
+      const h = grab.hist, a = h[0], b = h[h.length - 1], dt = Math.max(16, performance.now() - a.t) / 1000;
+      let vx = (b.x - a.x) / dt, vy = (b.y - a.y) / dt;
+      const sp = Math.hypot(vx, vy), MAXV = 4200;
+      if (sp > MAXV) { vx *= MAXV / sp; vy *= MAXV / sp; }
+      grab = null;
+      if (sp < 250) mode = 'back'; else throwPot(vx, vy);
+    }
+  };
   cv.addEventListener('pointerup', up);
   cv.addEventListener('pointercancel', up);
+
+  // ---- 投げる・跳ねる・割れる ----
+  // G = 重力（px/秒²）、BOUNCE = 壁で跳ね返るときに残る速さ、BREAK_HITS = 何回ぶつかったら割れるか
+  const G = 2200, BOUNCE = 0.72, BREAK_HITS = 3;
+  let flyer = null, shards = [], pile = null, restT = 0, waitT = 0, draining = false, dropV = 0, fxDirty = false;
+  function throwPot(vx, vy) {
+    render();                                     // いまの見た目を1枚の絵にして飛ばす
+    const b = prevBox, w = b.x1 - b.x0, h = b.y1 - b.y0;
+    const sp = document.createElement('canvas'); sp.width = w; sp.height = h;
+    sp.getContext('2d').putImageData(img, -b.x0, -b.y0, b.x0, b.y0, w, h);
+    const ox = cx * S - b.x0, oy = (top + bottom) / 2 * S - b.y0;   // 絵の中の、壺の中心
+    flyer = { sp, ox, oy, w, h, x: cx, y: (top + bottom) / 2, vx, vy, a: 0, va: vx * 0.003,
+              hw: Math.max(ox, w - ox) / S * 0.92, hh: Math.max(oy, h - oy) / S * 0.92, hits: 0, lastHit: -1, t: 0 };
+    cv.style.transition = 'none'; cv.style.opacity = 0;
+    mode = 'fly';
+  }
+  function stepFly(dt) {
+    const f = flyer;
+    f.t += dt; f.vy += G * dt; f.x += f.vx * dt; f.y += f.vy * dt; f.a += f.va * dt;
+    const c = Math.abs(Math.cos(f.a)), s = Math.abs(Math.sin(f.a));
+    const ex = c * f.hw + s * f.hh, ey = s * f.hw + c * f.hh;   // 回った壺の、左右・上下へのはみ出し
+    let hit = false;
+    if (f.x - ex < 0) { f.x = ex; f.vx = Math.abs(f.vx) * BOUNCE; hit = true; }
+    if (f.x + ex > W) { f.x = W - ex; f.vx = -Math.abs(f.vx) * BOUNCE; hit = true; }
+    if (f.y - ey < 0) { f.y = ey; f.vy = Math.abs(f.vy) * BOUNCE; hit = true; }
+    if (f.y + ey > H) { f.y = H - ey; f.vy = -Math.abs(f.vy) * BOUNCE; f.vx *= 0.9; hit = true; }
+    // 同じぶつかりで何度も数えないよう、0.15 秒あけて数える
+    if (hit && f.t - f.lastHit > 0.15) { f.hits++; f.lastHit = f.t; f.va = -f.va * 0.8 + (Math.random() - 0.5) * 6; }
+    if (f.hits >= BREAK_HITS || f.t > 3) shatter();
+  }
+  // 割れる: 絵をでこぼこの破片（ボロノイ分割）に切り分けて、ばらまく
+  function shatter() {
+    const f = flyer, NS = 26, seeds = [];
+    const data = f.sp.getContext('2d').getImageData(0, 0, f.w, f.h).data;
+    for (let k = 0; k < 4000 && seeds.length < NS; k++) {   // 壺が描かれている所にだけ種を置く
+      const x = Math.random() * f.w, y = Math.random() * f.h;
+      if (data[((y | 0) * f.w + (x | 0)) * 4 + 3] > 0) seeds.push([x, y]);
+    }
+    const ca = Math.cos(f.a), sa = Math.sin(f.a);
+    shards = [];
+    for (let i = 0; i < seeds.length; i++) {
+      let poly = [[0, 0], [f.w, 0], [f.w, f.h], [0, f.h]];
+      for (let j = 0; j < seeds.length && poly.length; j++) if (j !== i) poly = clipHalf(poly, seeds[i], seeds[j]);
+      if (poly.length < 3) continue;
+      let bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9, mx = 0, my = 0;
+      for (const [x, y] of poly) { bx0 = Math.min(bx0, x); by0 = Math.min(by0, y); bx1 = Math.max(bx1, x); by1 = Math.max(by1, y); mx += x; my += y; }
+      mx /= poly.length; my /= poly.length;
+      bx0 = Math.floor(bx0); by0 = Math.floor(by0);
+      const cw = Math.max(1, Math.ceil(bx1) - bx0), chh = Math.max(1, Math.ceil(by1) - by0);
+      const c = document.createElement('canvas'); c.width = cw; c.height = chh;
+      const g = c.getContext('2d');
+      g.beginPath(); poly.forEach(([x, y], k) => k ? g.lineTo(x - bx0, y - by0) : g.moveTo(x - bx0, y - by0)); g.closePath();
+      g.clip(); g.drawImage(f.sp, -bx0, -by0);
+      let rs = 0; for (const [x, y] of poly) rs = Math.max(rs, Math.hypot(x - mx, y - my));
+      // 破片の中心の画面での位置と、飛び散る速さ（壺の速さの一部＋中心から外へ）
+      const lx = (mx - f.ox) / S, ly = (my - f.oy) / S, ll = Math.hypot(lx, ly) || 1;
+      const wx = lx * ca - ly * sa, wy = lx * sa + ly * ca, kick = 180 + Math.random() * 320;
+      shards.push({ c, dx: (bx0 - mx) / S, dy: (by0 - my) / S, cw: cw / S, ch: chh / S, rs: rs / S,
+        x: f.x + wx, y: f.y + wy, a: f.a, va: (Math.random() - 0.5) * 14,
+        vx: f.vx * 0.35 + wx / ll * kick, vy: f.vy * 0.35 + wy / ll * kick - 250, rest: false });
+    }
+    pile = new Float32Array(Math.ceil(W / 4) + 2);   // 画面下にたまった破片の高さ（4px ごと）
+    flyer = null; restT = 0; waitT = 0; draining = false; mode = 'shards';
+  }
+  // 多角形 poly を「点 a の側」（a と b の垂直二等分線で分けた a 側）だけに切る
+  function clipHalf(poly, a, b) {
+    const nx = b[0] - a[0], ny = b[1] - a[1], m = (nx * (a[0] + b[0]) + ny * (a[1] + b[1])) / 2, out = [];
+    for (let k = 0; k < poly.length; k++) {
+      const p = poly[k], q = poly[(k + 1) % poly.length];
+      const dp = p[0] * nx + p[1] * ny - m, dq = q[0] * nx + q[1] * ny - m;
+      if (dp <= 0) out.push(p);
+      if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0)) { const t = dp / (dp - dq); out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]); }
+    }
+    return out;
+  }
+  function pileAt(x) { return pile[Math.max(0, Math.min(pile.length - 1, Math.round(x / 4)))]; }
+  function stepShards(dt) {
+    let moving = 0;
+    for (const s of shards) {
+      if (s.rest) continue;
+      if (s.delay > 0) { s.delay -= dt; continue; }
+      moving++;
+      s.vy += G * dt; s.x += s.vx * dt; s.y += s.vy * dt; s.a += s.va * dt;
+      if (draining) continue;                       // 抜け落ちるとき: 床も壁もなく、そのまま画面の下へ
+      if (s.x < s.rs * 0.5) { s.x = s.rs * 0.5; s.vx = Math.abs(s.vx) * 0.5; }
+      if (s.x > W - s.rs * 0.5) { s.x = W - s.rs * 0.5; s.vx = -Math.abs(s.vx) * 0.5; }
+      const fy = H - pileAt(s.x) - s.rs * 0.3;   // 床（すでにたまった破片の上）
+      if (s.y > fy) {
+        s.y = fy;
+        if (s.vy > 260 && restT < 2.5) { s.vy = -s.vy * 0.3; s.vx *= 0.6; s.va *= 0.5; }
+        else {                                      // 止まって、山の高さを上げる
+          s.rest = true;
+          const ht = H - s.y + s.rs * 0.15;   // 山は低めに（破片は寝かせて重なる）
+          const i0 = Math.max(0, Math.round((s.x - s.rs * 0.7) / 4)), i1 = Math.min(pile.length - 1, Math.round((s.x + s.rs * 0.7) / 4));
+          for (let i = i0; i <= i1; i++) pile[i] = Math.max(pile[i], ht);
+        }
+      }
+    }
+    if (draining) { shards = shards.filter(s => s.y - s.rs < H + 20); return; }   // 画面の下へ出たものは消す
+    restT += dt;
+    if (moving === 0 || restT > 4) {              // 全部たまったら、一息（0.9 秒）おいて抜け落ちる
+      waitT += dt;
+      if (waitT > 0.9) drain();
+    }
+  }
+  // 破片の山が下へ抜け落ちるのと同時に、上から次の筒が降ってくる
+  function drain() {
+    draining = true;
+    for (const s of shards) {
+      s.rest = false; s.delay = Math.random() * 0.12;   // 少しずつずれて落ち始める
+      s.vx = (Math.random() - 0.5) * 40; s.vy = Math.random() * 60; s.va = (Math.random() - 0.5) * 1.5;
+    }
+    nextPot();
+  }
+  function nextPot() {
+    let p; do p = PRESETS[Math.floor(Math.random() * PRESETS.length)]; while (p === preset && PRESETS.length > 1);
+    preset = p;
+    radius.fill(cylR());
+    cx = baseCx; top = -potH - 40; bottom = top + potH; dropV = 0;   // 画面の上の外から
+    buf.fill(0); ctx.clearRect(0, 0, cv.width, cv.height); prevBox = null;
+    cv.style.transition = 'none'; cv.style.opacity = 1;
+    mode = 'drop';
+  }
+  function drawFx() {
+    fctx.setTransform(1, 0, 0, 1, 0, 0);
+    fctx.clearRect(0, 0, fx.width, fx.height);
+    if (flyer) {
+      const f = flyer;
+      fctx.setTransform(S, 0, 0, S, 0, 0); fctx.translate(f.x, f.y); fctx.rotate(f.a);
+      fctx.drawImage(f.sp, -f.ox / S, -f.oy / S, f.w / S, f.h / S);
+    }
+    for (const s of shards) {
+      fctx.setTransform(S, 0, 0, S, 0, 0); fctx.translate(s.x, s.y); fctx.rotate(s.a);
+      fctx.drawImage(s.c, s.dx, s.dy, s.cw, s.ch);
+    }
+  }
 
   // ---- 描画 ----
   // 壺を、高さごとの薄い輪切り（見下ろしたのでだ円）の積み重ねとして描く。
@@ -279,6 +459,7 @@ button {
 
     const box = { x0: Math.max(0, Math.floor(cx * S - maxR) - 2), x1: Math.min(cw, Math.ceil(cx * S + maxR) + 2),
                   y0: Math.max(0, Math.floor(top * S - K * maxR - SR[0] * RIM * 0.5) - 2), y1: Math.min(chh, Math.ceil(bottom * S + K * maxR) + 2) };
+    if (box.y1 < box.y0) box.y1 = box.y0;       // 壺が画面の上の外にいるとき（降ってくる前）
     const clear = prevBox ? { x0: Math.min(box.x0, prevBox.x0), x1: Math.max(box.x1, prevBox.x1), y0: Math.min(box.y0, prevBox.y0), y1: Math.max(box.y1, prevBox.y1) } : box;
     for (let y = clear.y0; y < clear.y1; y++) buf.fill(pBG, y * cw + clear.x0, y * cw + clear.x1);
 
@@ -398,12 +579,25 @@ button {
     prevBox = box;
   }
 
-  function frame(now) {
+  function frame(now) { step(now); requestAnimationFrame(frame); }
+  function step(now) {
     const dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
     lastT = now;
     phase += dt * SPIN;                // 回り続けるので毎フレーム描く
-    render();
-    requestAnimationFrame(frame);
+    if (mode === 'back') {             // つかんだけど投げなかった: 元の位置へなめらかに戻る
+      const k = 1 - Math.exp(-dt * 14);
+      cx += (baseCx - cx) * k; top += (baseTop - top) * k; bottom = top + potH;
+      if (Math.abs(cx - baseCx) < 0.3 && Math.abs(top - baseTop) < 0.3) { cx = baseCx; top = baseTop; bottom = top + potH; mode = 'shape'; }
+    }
+    if (mode === 'drop') {             // 次の筒が上から降ってきて、元の位置で小さく弾んで止まる
+      dropV += G * dt; top += dropV * dt;
+      if (top >= baseTop) { top = baseTop; if (dropV > 500) dropV = -dropV * 0.22; else { dropV = 0; mode = 'shape'; } }
+      bottom = top + potH;
+    }
+    if (mode === 'fly') stepFly(dt);
+    if (shards.length) stepShards(dt);
+    if (mode === 'shape' || mode === 'grab' || mode === 'back' || mode === 'drop') render();
+    if (flyer || shards.length || fxDirty) { drawFx(); fxDirty = !!(flyer || shards.length); }
   }
 
   // 説明シートを閉じたら、ヒントを出す
@@ -415,7 +609,8 @@ button {
   addEventListener('resize', layout);
   layout();
   requestAnimationFrame(frame);
-  window.__pot = { radius, render, get top() { return top; }, get bottom() { return bottom; }, get cx() { return cx; } };
+  window.__pot = { radius, render, get top() { return top; }, get bottom() { return bottom; }, get cx() { return cx; },
+                   get mode() { return mode; }, get shards() { return shards; }, throwPot, step };
 })();
 </script>
 </body>
