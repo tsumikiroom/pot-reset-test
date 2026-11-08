@@ -11,7 +11,9 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body {
   margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
-  background: #fff; color: var(--ink); touch-action: none;
+  /* 白ホリ風: うすいグレー。中央の少し下がいちばん明るく、外へなめらかに少し暗くなる */
+  background: #e6e8ea radial-gradient(ellipse 120% 85% at 50% 58%, #f3f4f5 0%, #eceef0 35%, #e2e5e7 70%, #d6d9dc 100%) fixed;
+  color: var(--ink); touch-action: none;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
   font: 500 15px/1.3 "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; letter-spacing: -.01em;
 }
