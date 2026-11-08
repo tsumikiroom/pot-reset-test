@@ -304,20 +304,21 @@ const mWall = new CANNON.Material('wall'), mPot = new CANNON.Material('pot'), mS
 world.addContactMaterial(new CANNON.ContactMaterial(mWall, mPot, { friction: 0.3, restitution: 0.55 }));
 world.addContactMaterial(new CANNON.ContactMaterial(mWall, mShard, { friction: 0.5, restitution: 0.25 }));
 world.addContactMaterial(new CANNON.ContactMaterial(mShard, mShard, { friction: 0.6, restitution: 0.15 }));
-let walls = [], floorBody = null, floorY = -1, ceilY = 1, halfW = 0.5;
+let walls = [], floorBody = null, floorY = -1, ceilY = 1, halfW = 0.5, halfD = 0.7;
 function buildArena() {                          // 画面の見える範囲を囲む箱（床・天井・左右・前後）
   for (const b of walls) world.removeBody(b);
   walls = [];
-  halfW = VIS_H * aspect / 2; floorY = TARGET.y - VIS_H / 2 + 0.02; ceilY = TARGET.y + VIS_H / 2;
+  halfW = VIS_H * aspect / 2; floorY = TARGET.y - VIS_H / 2 + 0.1; ceilY = TARGET.y + VIS_H / 2;
+  halfD = Math.max(0.7, rMax + 0.15);            // 前後の壁（広い画面で太い壺が壁にめり込まないように）
   const add = (n, p) => {
     const b = new CANNON.Body({ mass: 0, material: mWall, shape: new CANNON.Plane() });
     b.quaternion.setFromVectors(new CANNON.Vec3(0, 0, 1), new CANNON.Vec3(...n));
     b.position.set(...p); world.addBody(b); walls.push(b); return b;
   };
-  floorBody = add([0, 1, 0], [0, floorY, 0]);
+  if (!draining) floorBody = add([0, 1, 0], [0, floorY, 0]);   // 破片が抜け落ちている間は床を戻さない
   add([0, -1, 0], [0, ceilY, 0]);
   add([1, 0, 0], [-halfW, 0, 0]); add([-1, 0, 0], [halfW, 0, 0]);
-  add([0, 0, 1], [0, 0, -0.7]); add([0, 0, -1], [0, 0, 0.7]);
+  add([0, 0, 1], [0, 0, -halfD]); add([0, 0, -1], [0, 0, halfD]);
 }
 // 点の集まりの凸包を、cannon の当たり判定の形にする
 function convexShape(points) {
@@ -503,6 +504,7 @@ function throwPot(vx, vy) {                      // vx, vy: 画面の上で指�
 function shatter() {
   const local = lastImpact ? potBody.pointToLocalFrame(lastImpact) : null;
   const pieces = fracture(local ? new THREE.Vector3(local.x, local.y, local.z) : null);
+  if (shardMat) shardMat.dispose();
   shardMat = potMat.clone(); applyPreset(shardMat, preset);
   const impactW = lastImpact ? new THREE.Vector3(lastImpact.x, lastImpact.y, lastImpact.z) : new THREE.Vector3().copy(potBody.position);
   for (const pc of pieces) {
@@ -547,7 +549,7 @@ function stepShards(dt) {
       if (s.body.position.y > floorY - 2.5) return true;
       world.removeBody(s.body); scene.remove(s.mesh); s.mesh.geometry.dispose(); return false;
     });
-    if (!shards.length) { if (!walls.includes(floorBody)) buildArena(); draining = false; }
+    if (!shards.length) { draining = false; buildArena(); }
     return;
   }
   restT += dt;
@@ -602,8 +604,8 @@ function startGrab(id, p) {
   if (Math.abs(p.x - s.cx) > rAt(t) * s.ppu + 24) return;   // つかめるのは壺の上を押しているときだけ
   mode = 'grab';
   for (const [k, q] of pointers) if (k !== id) { clearTimeout(q.timer); pointers.delete(k); }
-  const dir = camera.getWorldDirection(new THREE.Vector3());
-  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(dir, potGroup.position);
+  // 指で動かすのは、壺の奥行きの位置を通る縦の面の上（上から見ていても奥へ逃げない）
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 0, 1), potGroup.position);
   const off = potGroup.position.clone().sub(screenToPlane(p.x, p.y, plane));
   potGroup.position.y += 0.03;                   // 少し持ち上がる
   grab = { id, plane, off, hist: [{ x: p.x, y: p.y, t: performance.now() }] };
@@ -616,7 +618,10 @@ canvas.addEventListener('pointermove', e => {
     if (grab.id !== e.pointerId) return;
     const w = screenToPlane(e.clientX, e.clientY, grab.plane).add(grab.off);
     // 壺の中心は画面（箱）の中に収める
-    potGroup.position.set(Math.min(halfW, Math.max(-halfW, w.x)), Math.min(ceilY, Math.max(floorY, w.y)), w.z);
+    // 壺が箱（床・天井・壁）にめり込まないよう、中心を「半分の高さ・いちばん太い半径」ぶん内側に収める
+    let rm = 0; for (let i = 0; i < N; i++) rm = Math.max(rm, radius[i]);
+    const cl = (v, lo, hi) => lo > hi ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, v));
+    potGroup.position.set(cl(w.x, -halfW + rm, halfW - rm), cl(w.y, floorY + 0.52, ceilY - 0.52), cl(w.z, -halfD + rm, halfD - rm));
     const t = performance.now();
     grab.hist.push({ x: e.clientX, y: e.clientY, t });
     while (grab.hist.length > 2 && t - grab.hist[0].t > 100) grab.hist.shift();
