@@ -16,7 +16,6 @@ html, body {
   font: 500 15px/1.3 "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; letter-spacing: -.01em;
 }
 canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-#fx { pointer-events: none; }
 
 button {
   font: inherit; color: var(--ink); background: var(--paper); cursor: pointer; touch-action: manipulation;
@@ -59,7 +58,6 @@ button {
 </head>
 <body>
 <canvas id="c"></canvas>
-<canvas id="fx"></canvas>
 <div id="hint" class="hide">Push or pull the edge</div>
 
 <div id="start">
@@ -83,577 +81,659 @@ button {
       <text x="292" y="124" text-anchor="end" stroke="none">pull</text>
       <text x="200" y="4" stroke="none">spin</text>
     </svg>
-    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. Tilt the phone to peek inside. Press and hold, then swipe to throw it: it bounces, breaks, and a new one drops in. The colours are picked at random each time.</p>
+    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. Tilt the phone to look at it from above, below or the side. Press and hold, then swipe to throw it: it bounces, breaks, and a new one drops in. The colours are picked at random each time.</p>
     <div class="choose">
       <button id="go"><span>Start</span><span aria-hidden="true">&rarr;</span></button>
     </div>
     <div class="meta small foot"><span>Runs on this device</span><span>No sound</span></div>
   </div>
 </div>
-<script>
-(() => {
-  // 色の組み合わせ。c = 正面の色（口 → 胴 → 底 の3色を高さでつなぐ）、
-  // r = リムの色（輪郭寄りを置きかえる色。上 → 下 の2色）。参考の9つの壺から読み取った
-  const PRESETS = [
-    { c: ['#a99bff', '#f4c3f0', '#c2603e'], r: ['#5a48ff', '#5a3cff'] },  // ラベンダー × 青紫のリム、底は赤茶
-    { c: ['#c80012', '#ffc81e', '#ffffff'], r: ['#ff3a10', '#fff4c8'] },  // 赤 → 黄 → 白
-    { c: ['#000006', '#020418', '#2a64ff'], r: ['#0a2aa8', '#3c8cff'] },  // 黒い芯 × 青いリム
-    { c: ['#7a0006', '#8c000c', '#a0101c'], r: ['#e040c8', '#3ce0e8'] },  // 暗い赤 × マゼンタ〜シアンのリム
-    { c: ['#18c818', '#f6c4f0', '#eab0e8'], r: ['#0a6a0a', '#e888e0'] },  // 緑の口 → ピンク
-    { c: ['#5c5c5c', '#7c7c7c', '#cfcfcf'], r: ['#f2f2f2', '#ffffff'] },  // 灰の芯 × 白いリム
-    { c: ['#ff2a78', '#a8f0e0', '#c8f4ec'], r: ['#ff1050', '#ff2a8a'] },  // ミント × 濃いピンクのリム
-    { c: ['#b4b4b4', '#9a9a9a', '#d8d8d8'], r: ['#101010', '#202020'] },  // 灰 × 黒いリム
-    { c: ['#ff7a1a', '#ff6a10', '#ff8a30'], r: ['#5a40d8', '#7a50ff'] },  // オレンジ × 紫のリム
-  ].map(p => ({ c: p.c.map(hex), r: p.r.map(hex) }));
-  const BG = hex('#5b6376');
-  const N = 160;                 // 輪郭の分割数（高さ方向）
-  const radius = new Float32Array(N);
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { ConvexHull } from 'three/addons/math/ConvexHull.js';
+import * as CANNON from 'cannon-es';
 
-  // 見下ろす角度: 口のだ円のつぶれ具合（0 = 真横、1 = 真上）。スマホの傾きで少し変わる（setView）
-  let K = 0.28, KC = Math.sqrt(1 - K * K);
-  const RIM = 0.14;              // 口のふちの厚み（半径に対する割合）
-  // 光（左上手前から）と、見る向き、その中間（ハイライト用）
-  // 光は左右の傾きで縦の軸のまわりに少し回る（lAng）
-  const L0 = norm([-0.45, 0.65, 0.6]);
-  let L = L0, V = [0, K, KC], HV = L0, lAng = 0;
-  function setView(k, la) {
-    K = k; KC = Math.sqrt(1 - K * K); lAng = la;
-    const c = Math.cos(la), s = Math.sin(la);
-    L = norm([L0[0] * c + L0[2] * s, L0[1], -L0[0] * s + L0[2] * c]);
-    V = [0, K, KC]; HV = norm([L[0] + V[0], L[1] + V[1], L[2] + V[2]]);
-  }
-  setView(K, 0);
-  // 回転: 色の帯が表面ごと少し回って見える。SPIN は1秒あたりの回転量、SWIRL はその強さ
-  const SPIN = 1.6, SWIRL = 0.07;
-  // 表面に貼りついた粒（グレイン）。回転と一緒に流れて、回っている感じを出す。
-  // GW = 1周あたりの粒の数、GAMP = 粒の明暗の強さ（0〜255）
-  const GW = 1024, GH = 512, GAMP = 22;
-  const GRAIN = new Float32Array(GW * GH);
-  for (let i = 0; i < GW * GH; i++) GRAIN[i] = (Math.random() + Math.random() - 1) * GAMP;
-  const GK = GW / (2 * Math.PI);
+// 3D 版。壺は「縦の輪郭（高さごとの半径）」を軸のまわりに回した立体（WebGL で描く）。
+// 見た目（ごく弱い陰、別の色へ置きかえる幅広いリム、粒、高さの3色）はシェーダーで再現する。
+// 投げると3Dの剛体として跳ね、割れると厚みのある3Dの破片（物理つき）になる。
 
-  const cv = document.getElementById('c');
-  const ctx = cv.getContext('2d');
-  const hint = document.getElementById('hint');
-  const fx = document.getElementById('fx'), fctx = fx.getContext('2d');   // 投げた壺と破片を描く層
-  let W = 0, H = 0, S = 1;       // CSS px と描画倍率
-  let img, buf;                  // 画面全体の画素
-  let top, bottom, cx, rMin, rMax, potH, baseTop, baseCx;
-  // 色は開くたび・新しい壺が出るたびにランダムで決まる（選ぶ手段は出さない）
-  let preset = PRESETS[Math.floor(Math.random() * PRESETS.length)];
-  let prevBox = null, phase = 0, lastT = 0;
+// 色の組み合わせ。c = 正面の色（口 → 胴 → 底 の3色を高さでつなぐ）、
+// r = リムの色（輪郭寄りを置きかえる色。上 → 下 の2色）。参考の9つの壺から読み取った
+const PRESETS = [
+  { c: ['#a99bff', '#f4c3f0', '#c2603e'], r: ['#5a48ff', '#5a3cff'] },  // ラベンダー × 青紫のリム、底は赤茶
+  { c: ['#c80012', '#ffc81e', '#ffffff'], r: ['#ff3a10', '#fff4c8'] },  // 赤 → 黄 → 白
+  { c: ['#000006', '#020418', '#2a64ff'], r: ['#0a2aa8', '#3c8cff'] },  // 黒い芯 × 青いリム
+  { c: ['#7a0006', '#8c000c', '#a0101c'], r: ['#e040c8', '#3ce0e8'] },  // 暗い赤 × マゼンタ〜シアンのリム
+  { c: ['#18c818', '#f6c4f0', '#eab0e8'], r: ['#0a6a0a', '#e888e0'] },  // 緑の口 → ピンク
+  { c: ['#5c5c5c', '#7c7c7c', '#cfcfcf'], r: ['#f2f2f2', '#ffffff'] },  // 灰の芯 × 白いリム
+  { c: ['#ff2a78', '#a8f0e0', '#c8f4ec'], r: ['#ff1050', '#ff2a8a'] },  // ミント × 濃いピンクのリム
+  { c: ['#b4b4b4', '#9a9a9a', '#d8d8d8'], r: ['#101010', '#202020'] },  // 灰 × 黒いリム
+  { c: ['#ff7a1a', '#ff6a10', '#ff8a30'], r: ['#5a40d8', '#7a50ff'] },  // オレンジ × 紫のリム
+].map(p => ({ c: p.c.map(hexv), r: p.r.map(hexv) }));
+function hexv(h) { return new THREE.Vector3(parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255); }
 
-  function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
-  function norm(v) { const l = Math.hypot(...v); return v.map(x => x / l); }
-  function pack(r, g, b) {       // little-endian RGBA。0〜255 に収める
-    r = r < 0 ? 0 : r > 255 ? 255 : r | 0; g = g < 0 ? 0 : g > 255 ? 255 : g | 0; b = b < 0 ? 0 : b > 255 ? 255 : b | 0;
-    return (255 << 24) | (b << 16) | (g << 8) | r;
-  }
+// ---- 寸法（世界の単位: 壺の高さ = 1、壺の中心が原点） ----
+const FOV = 22;                                  // 画角（狭めにして、ほぼ平行に見える）
+const VIS_H = 1 / 0.55;                          // 壺が画面の高さの 55% に見える見え幅
+const DIST = VIS_H / 2 / Math.tan(FOV * Math.PI / 360);
+const TARGET = new THREE.Vector3(0, -0.04, 0);   // カメラが見る点（壺は少し上寄り）
+const N = 160;                                   // 輪郭の分割数（高さ方向、0 = 口、N-1 = 底）
+const NS = 120, M = 96;                          // 立体にするときの縦・周の分割数
+const SPIN = 1.6;                                // ろくろの回転（ラジアン/秒）
+const G = 12;                                    // 重力（壺の高さ/秒²）
+const radius = new Float32Array(N);
+let T = 0.025, rMin = 0.05, rMax = 0.4, aspect = 1, W = 1, H = 1;
+let preset = PRESETS[Math.floor(Math.random() * PRESETS.length)];
 
-  function layout() {
-    if (!innerWidth || !innerHeight) return;
-    const oldW = W;
-    W = innerWidth; H = innerHeight;
-    S = Math.min(devicePixelRatio || 1, 1.5);   // なめらかな陰影なので 1.5 倍で十分。重さを抑える
-    cv.width = fx.width = Math.round(W * S); cv.height = fx.height = Math.round(H * S);
-    img = ctx.createImageData(cv.width, cv.height);
-    buf = new Uint32Array(img.data.buffer);
-    buf.fill(0);                 // 背景は透明（ページの背景色が見える）
-    prevBox = null;
-    potH = Math.min(H * 0.55, W * 1.4);
-    top = baseTop = H * 0.48 - potH / 2; bottom = top + potH;
-    cx = baseCx = W / 2;
-    rMin = W * 0.035; rMax = W * 0.44;
-    if (!oldW) radius.fill(cylR());                                  // 最初は筒
-    else for (let i = 0; i < N; i++) radius[i] *= W / oldW;
-  }
+const canvas = document.getElementById('c');
+const hint = document.getElementById('hint');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setClearColor(0x000000, 0);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 60);
 
-  function cylR() { return Math.min(W * 0.2, potH * 0.3); }
-
-  // 高さ y（CSS px、輪郭の真横の位置）での半径（線形補間）
-  function rAt(y) {
-    const f = (y - top) / (bottom - top) * (N - 1);
-    if (f <= 0) return radius[0];
-    if (f >= N - 1) return radius[N - 1];
-    // なめらかな曲線でつなぐ（直線でつなぐと、光の当たり方に段々の横じまが出る）
-    const i = Math.floor(f), t = f - i;
-    const p0 = radius[i > 0 ? i - 1 : 0], p1 = radius[i], p2 = radius[i + 1], p3 = radius[i + 2 < N ? i + 2 : N - 1];
-    return p1 + 0.5 * t * (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)));
-  }
-
-  // 指が横に動いた分だけ、その高さの周りをなめらかに押す・引く
-  function push(y, target) {
-    const f = (y - top) / (bottom - top) * (N - 1);
-    const d = target - rAt(y);
-    if (Math.abs(d) < 0.01) return;
-    const sigma = N * 0.075;
-    for (let i = 0; i < N; i++) {
-      const w = Math.exp(-((i - f) ** 2) / (2 * sigma * sigma));
-      if (w < 0.002) continue;
-      radius[i] = Math.min(rMax, Math.max(rMin, radius[i] + d * w));
+// ---- 見た目（シェーダー） ----
+const VERT = `
+attribute vec3 aOrig;    // 壺の中での元の位置（破片になっても色・粒はここで決める）
+attribute float aType;   // 0 外側 / 1 口のふち / 2 内側 / 3 底 / 4 割れた断面
+varying vec3 vW; varying vec3 vN; varying vec3 vO; varying float vT; varying vec3 vR;
+void main() {
+  vec4 w = modelMatrix * vec4(position, 1.0);
+  vW = w.xyz; vN = normalize(mat3(modelMatrix) * normal);
+  vO = aOrig; vT = aType; vR = mat3(modelMatrix) * vec3(aOrig.x, 0.0, aOrig.z);
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`;
+const FRAG = `
+uniform vec3 uC0, uC1, uC2, uR0, uR1, uL;
+varying vec3 vW; varying vec3 vN; varying vec3 vO; varying float vT; varying vec3 vR;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+vec3 colorAt(float g) {            // 高さ g（0 = 口、1 = 底）の色を3色からなめらかに
+  g = clamp(g, 0.0, 1.0);
+  vec3 a = g < 0.5 ? uC0 : uC1, b = g < 0.5 ? uC1 : uC2;
+  float t = g < 0.5 ? g * 2.0 : g * 2.0 - 1.0; t = t * t * (3.0 - 2.0 * t);
+  return mix(a, b, t);
+}
+void main() {
+  vec3 N = normalize(vN); if (!gl_FrontFacing) N = -N;
+  vec3 V = normalize(cameraPosition - vW);
+  float phi = atan(vO.x, vO.z);
+  float gH = clamp(0.5 - vO.y, 0.0, 1.0);
+  bool inner = vT > 1.5 && vT < 2.5;
+  // 粒: 回転の角度と高さで決まるので、表面に貼りついて一緒に回る
+  vec2 cell = vec2(floor((phi / 6.2831853 + 0.5) * 1024.0), floor(vO.y * 350.0) + (inner ? 700.0 : 0.0));
+  float gn = (hash(cell) + hash(cell + vec2(37.0, 91.0)) - 1.0) * 22.0 / 255.0;
+  vec3 col;
+  if (inner) {
+    // 中: 口の色。奥ほど少し暗い（最大で2割）
+    float d = 1.0 - clamp(gH * 1.6, 0.0, 1.0);
+    col = colorAt(0.0) * (0.8 + 0.2 * d * d);
+  } else {
+    float g = gH + 0.07 * sin(2.0 * phi);           // 色の帯が少しうねる
+    bool lip = vT > 0.5 && vT < 1.5;
+    vec3 ct = lip ? colorAt(0.0) : colorAt(g);
+    vec3 rt = lip ? uR0 : mix(uR0, uR1, clamp(g, 0.0, 1.0));
+    // 陰はごく弱く。つやは小さく
+    float w = max((dot(N, uL) + 0.5) / 1.5, 0.0);
+    float m = 0.9 + 0.15 * w;
+    float h = max(dot(N, normalize(uL + V)), 0.0); h *= h; h *= h;
+    float spec = 8.0 / 255.0 * h;
+    if (vT > 3.5) {
+      col = ct * m * 0.86;                          // 割れた断面: 少し暗い素地
+    } else {
+      // リム（フレネル）: 正面から輪郭へ向かって、リムの色へ置きかえる。
+      // 横の向き hz を半分まぜて、下を向いた面まで一色にならないようにする
+      vec2 vh = V.xz; float vl = length(vh); vh = vl > 1e-4 ? vh / vl : vec2(0.0, 1.0);
+      vec2 rd = vR.xz; float rl = length(rd); rd = rl > 1e-4 ? rd / rl : vec2(0.0);
+      float hz = dot(N.xz, vh) + max(N.y, 0.0) * dot(rd, vh);
+      float nf = 0.55 * max(dot(N, V), 0.0) + 0.45 * max(hz, 0.0);
+      float t = clamp((1.0 - nf - 0.06) / 0.62, 0.0, 1.0);
+      float fr = t * t * (3.0 - 2.0 * t);
+      col = (ct * m + spec) * (1.0 - fr) + rt * fr;
     }
   }
+  gl_FragColor = vec4(col + gn, 1.0);
+}`;
+const potMat = new THREE.ShaderMaterial({
+  vertexShader: VERT, fragmentShader: FRAG, side: THREE.DoubleSide,
+  uniforms: { uC0: { value: new THREE.Vector3() }, uC1: { value: new THREE.Vector3() }, uC2: { value: new THREE.Vector3() },
+              uR0: { value: new THREE.Vector3() }, uR1: { value: new THREE.Vector3() },
+              uL: { value: new THREE.Vector3(-0.45, 0.65, 0.6).normalize() } },
+});
+function applyPreset(mat, p) {
+  mat.uniforms.uC0.value.copy(p.c[0]); mat.uniforms.uC1.value.copy(p.c[1]); mat.uniforms.uC2.value.copy(p.c[2]);
+  mat.uniforms.uR0.value.copy(p.r[0]); mat.uniforms.uR1.value.copy(p.r[1]);
+}
+applyPreset(potMat, preset);
 
-  // ---- 指 ----
-  // mode: shape = 形を作る / grab = 長押しでつかんでいる / back = 元の位置へ戻る /
-  //       fly = 投げた壺が跳ね回る / shards = 割れた破片が落ちてたまる → 消える
-  let mode = 'shape', grab = null;
-  const HOLD_MS = 450, HOLD_MOVE = 8;          // 長押しの時間と、そのあいだ動いてもよい幅（px）
-  const pointers = new Map();
-  cv.addEventListener('pointerdown', e => {
-    if (mode !== 'shape') return;
-    if (e.clientY < top - 40 || e.clientY > bottom + 40) return;
-    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
-    const p = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, timer: 0 };
-    p.timer = setTimeout(() => startGrab(e.pointerId, p), HOLD_MS);
-    pointers.set(e.pointerId, p);
-    hint.classList.add('hide');
-  });
-  // 長押し: 指がほとんど動かないまま HOLD_MS たつと、壺をつかむ
-  function startGrab(id, p) {
-    if (mode !== 'shape' || p.moved || pointers.get(id) !== p) return;
-    // つかめるのは壺の上（その高さの胴の幅＋少しの余白）を押しているときだけ
-    if (Math.abs(p.x - cx) > rAt(Math.min(bottom, Math.max(top, p.y))) + 24) return;
-    mode = 'grab';
-    for (const [k, q] of pointers) if (k !== id) { clearTimeout(q.timer); pointers.delete(k); }
-    top -= 10; bottom = top + potH;              // 少し持ち上がる
-    grab = { id, offX: cx - p.x, offY: top - p.y, hist: [{ x: p.x, y: p.y, t: performance.now() }] };
-    if (navigator.vibrate) navigator.vibrate(12);
+// ---- 輪郭 ----
+function cylR() { return Math.min(0.2 * VIS_H * aspect, 0.3); }
+// 高さ t（0 = 口、1 = 底）での半径。なめらかな曲線でつなぐ
+function rAt(t) {
+  const f = (t < 0 ? 0 : t > 1 ? 1 : t) * (N - 1);
+  const i = Math.min(N - 2, Math.floor(f)), u = f - i;
+  const p0 = radius[i > 0 ? i - 1 : 0], p1 = radius[i], p2 = radius[i + 1], p3 = radius[i + 2 < N ? i + 2 : N - 1];
+  return p1 + 0.5 * u * (p2 - p0 + u * (2 * p0 - 5 * p1 + 4 * p2 - p3 + u * (3 * (p1 - p2) + p3 - p0)));
+}
+// 指が横に動いた分だけ、その高さの周りをなめらかに押す・引く
+function push(t, target) {
+  const f = t * (N - 1), d = target - rAt(t);
+  if (Math.abs(d) < 1e-5) return;
+  const sigma = N * 0.075;
+  for (let i = 0; i < N; i++) {
+    const w = Math.exp(-((i - f) ** 2) / (2 * sigma * sigma));
+    if (w < 0.002) continue;
+    radius[i] = Math.min(rMax, Math.max(rMin, radius[i] + d * w));
   }
-  cv.addEventListener('pointermove', e => {
-    const p = pointers.get(e.pointerId);
-    if (!p) return;
-    if (mode === 'grab') {
-      if (grab.id !== e.pointerId) return;
-      // 壺の中心は画面の中に収める（外へ持ち出すと、投げる絵が空になるため）
-      cx = Math.min(W, Math.max(0, e.clientX + grab.offX));
-      top = Math.min(H, Math.max(0, e.clientY + grab.offY + potH / 2)) - potH / 2; bottom = top + potH;
-      const t = performance.now();
-      grab.hist.push({ x: e.clientX, y: e.clientY, t });
-      while (grab.hist.length > 2 && t - grab.hist[0].t > 100) grab.hist.shift();
-      return;
+  shapeDirty = true;
+}
+
+// ---- 壺の立体（輪郭を軸のまわりに回す） ----
+// 輪郭は3本: A 底（中心 → 外）、B 外側（下 → 上）→ 口のふち（半円）→ 内側（上 → 下）、C 中の床（外 → 中心）
+const SA = 6, SB = (NS + 1) + 8 + (NS + 1), SC = 6, NP = SA + SB + SC;
+const PR = new Float32Array(NP), PY = new Float32Array(NP), PNR = new Float32Array(NP), PNY = new Float32Array(NP), PT = new Float32Array(NP);
+const NV = NP * (M + 1);
+const gPos = new Float32Array(NV * 3), gNor = new Float32Array(NV * 3), gTyp = new Float32Array(NV);
+const SINM = new Float32Array(M + 1), COSM = new Float32Array(M + 1);
+for (let i = 0; i <= M; i++) { SINM[i] = Math.sin(i / M * Math.PI * 2); COSM[i] = Math.cos(i / M * Math.PI * 2); }
+const potGeo = new THREE.BufferGeometry();
+const posAttr = new THREE.BufferAttribute(gPos, 3), origAttr = new THREE.BufferAttribute(gPos, 3);
+potGeo.setAttribute('position', posAttr); potGeo.setAttribute('aOrig', origAttr);
+potGeo.setAttribute('normal', new THREE.BufferAttribute(gNor, 3));
+potGeo.setAttribute('aType', new THREE.BufferAttribute(gTyp, 1));
+{
+  const idx = [];
+  for (const [o, n] of [[0, SA], [SA, SB], [SA + SB, SC]])
+    for (let j = 0; j < n - 1; j++) for (let i = 0; i < M; i++) {
+      const a = (o + j) * (M + 1) + i, b = a + 1, c = a + (M + 1) + 1, d = a + (M + 1);
+      idx.push(a, b, d, c, d, b);
     }
-    if (mode !== 'shape') return;
-    if (!p.moved && Math.hypot(e.clientX - p.x0, e.clientY - p.y0) > HOLD_MOVE) { p.moved = true; clearTimeout(p.timer); }
-    // 押した瞬間の位置から「ふち」を動かす。指の横の移動量だけ、ふちが内／外へ動く
-    const dx = Math.abs(e.clientX - cx) - Math.abs(p.x - cx);
-    const y = Math.min(bottom, Math.max(top, e.clientY));
-    push(y, rAt(y) + dx);
-    p.x = e.clientX; p.y = e.clientY;
-  });
-  const up = e => {
-    const p = pointers.get(e.pointerId);
-    if (p) clearTimeout(p.timer);
-    pointers.delete(e.pointerId);
-    if (mode === 'grab' && grab && grab.id === e.pointerId) {
-      // 最後の 0.1 秒の指の速さで投げる。ほとんど動いていなければ元の位置へ戻す
-      const h = grab.hist, a = h[0], b = h[h.length - 1], dt = Math.max(16, performance.now() - a.t) / 1000;
-      let vx = (b.x - a.x) / dt, vy = (b.y - a.y) / dt;
-      const sp = Math.hypot(vx, vy), MAXV = 4200;
-      if (sp > MAXV) { vx *= MAXV / sp; vy *= MAXV / sp; }
-      grab = null;
-      if (sp < 250) mode = 'back'; else throwPot(vx, vy);
-    }
+  potGeo.setIndex(idx);
+}
+let shapeDirty = true;
+function buildProfile() {
+  let k = 0;
+  const set = (r, y, ty) => { PR[k] = r; PY[k] = y; PT[k] = ty; k++; };
+  const rb = rAt(1);
+  for (let j = 0; j < SA; j++) set(rb * j / (SA - 1), -0.5, 3);
+  const b0 = k;
+  for (let j = 0; j <= NS; j++) { const t = 1 - j / NS; set(rAt(t), 0.5 - t, 0); }
+  const rt = rAt(0), lc = rt - T / 2;
+  for (let j = 1; j <= 8; j++) { const a = Math.PI * j / 9; set(lc + T / 2 * Math.cos(a), 0.5 + T / 2 * Math.sin(a), 1); }
+  for (let j = 0; j <= NS; j++) { const t = (1 - T) * j / NS; set(Math.max(rAt(t) - T, 0.01), 0.5 - t, 2); }
+  const b1 = k - 1;
+  const rf = Math.max(rAt(1 - T) - T, 0.01);
+  for (let j = 0; j < SC; j++) set(rf * (1 - j / (SC - 1)), -0.5 + T, 2);
+  // 面の向き: 底は下、中の床は上。B は進む向きの右手側（外向き）
+  for (let j = 0; j < SA; j++) { PNR[j] = 0; PNY[j] = -1; }
+  for (let j = b0; j <= b1; j++) {
+    const p = Math.max(b0, j - 1), q = Math.min(b1, j + 1);
+    const tr = PR[q] - PR[p], ty = PY[q] - PY[p], l = Math.hypot(tr, ty) || 1;
+    PNR[j] = ty / l; PNY[j] = -tr / l;
+  }
+  for (let j = b1 + 1; j < NP; j++) { PNR[j] = 0; PNY[j] = 1; }
+}
+function updatePotGeometry() {
+  buildProfile();
+  for (let p = 0; p < NP; p++) for (let i = 0; i <= M; i++) {
+    const v = p * (M + 1) + i, s = SINM[i], c = COSM[i];
+    gPos[v * 3] = PR[p] * s; gPos[v * 3 + 1] = PY[p]; gPos[v * 3 + 2] = PR[p] * c;
+    gNor[v * 3] = PNR[p] * s; gNor[v * 3 + 1] = PNY[p]; gNor[v * 3 + 2] = PNR[p] * c;
+    gTyp[v] = PT[p];
+  }
+  posAttr.needsUpdate = origAttr.needsUpdate = true;
+  potGeo.attributes.normal.needsUpdate = potGeo.attributes.aType.needsUpdate = true;
+  shapeDirty = false;
+}
+const potGroup = new THREE.Group();             // 位置・傾き（投げたとき）
+const potMesh = new THREE.Mesh(potGeo, potMat); // ろくろの回転
+potMesh.frustumCulled = false;
+potGroup.add(potMesh); scene.add(potGroup);
+
+// ---- 物理（cannon-es） ----
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -G, 0) });
+world.allowSleep = true;
+world.solver.iterations = 12;
+const mWall = new CANNON.Material('wall'), mPot = new CANNON.Material('pot'), mShard = new CANNON.Material('shard');
+world.addContactMaterial(new CANNON.ContactMaterial(mWall, mPot, { friction: 0.3, restitution: 0.55 }));
+world.addContactMaterial(new CANNON.ContactMaterial(mWall, mShard, { friction: 0.5, restitution: 0.25 }));
+world.addContactMaterial(new CANNON.ContactMaterial(mShard, mShard, { friction: 0.6, restitution: 0.15 }));
+let walls = [], floorBody = null, floorY = -1, ceilY = 1, halfW = 0.5;
+function buildArena() {                          // 画面の見える範囲を囲む箱（床・天井・左右・前後）
+  for (const b of walls) world.removeBody(b);
+  walls = [];
+  halfW = VIS_H * aspect / 2; floorY = TARGET.y - VIS_H / 2 + 0.02; ceilY = TARGET.y + VIS_H / 2;
+  const add = (n, p) => {
+    const b = new CANNON.Body({ mass: 0, material: mWall, shape: new CANNON.Plane() });
+    b.quaternion.setFromVectors(new CANNON.Vec3(0, 0, 1), new CANNON.Vec3(...n));
+    b.position.set(...p); world.addBody(b); walls.push(b); return b;
   };
-  cv.addEventListener('pointerup', up);
-  cv.addEventListener('pointercancel', up);
+  floorBody = add([0, 1, 0], [0, floorY, 0]);
+  add([0, -1, 0], [0, ceilY, 0]);
+  add([1, 0, 0], [-halfW, 0, 0]); add([-1, 0, 0], [halfW, 0, 0]);
+  add([0, 0, 1], [0, 0, -0.7]); add([0, 0, -1], [0, 0, 0.7]);
+}
+// 点の集まりの凸包を、cannon の当たり判定の形にする
+function convexShape(points) {
+  const hull = new ConvexHull().setFromPoints(points);
+  const verts = [], faces = [], map = new Map();
+  for (const f of hull.faces) {
+    const face = []; let e = f.edge;
+    do {
+      const p = e.head().point; let id = map.get(p);
+      if (id === undefined) { id = verts.length; map.set(p, id); verts.push(new CANNON.Vec3(p.x, p.y, p.z)); }
+      face.push(id); e = e.next;
+    } while (e !== f.edge);
+    faces.push(face);
+  }
+  return new CANNON.ConvexPolyhedron({ vertices: verts, faces });
+}
 
-  // ---- 投げる・跳ねる・割れる ----
-  // G = 重力（px/秒²）、BOUNCE = 壁で跳ね返るときに残る速さ、BREAK_HITS = 何回ぶつかったら割れるか
-  const G = 2200, BOUNCE = 0.72, BREAK_HITS = 3;
-  let flyer = null, shards = [], pile = null, restT = 0, waitT = 0, draining = false, dropV = 0, fxDirty = false;
-  function throwPot(vx, vy) {
-    render();                                     // いまの見た目を1枚の絵にして飛ばす
-    const b = prevBox, w = b.x1 - b.x0, h = b.y1 - b.y0;
-    if (w < 2 || h < 2) { mode = 'back'; return; }   // 念のため: 描くものが無ければ投げずに戻す
-    const sp = document.createElement('canvas'); sp.width = w; sp.height = h;
-    sp.getContext('2d').putImageData(img, -b.x0, -b.y0, b.x0, b.y0, w, h);
-    const ox = cx * S - b.x0, oy = (top + bottom) / 2 * S - b.y0;   // 絵の中の、壺の中心
-    flyer = { sp, ox, oy, w, h, x: cx, y: (top + bottom) / 2, vx, vy, a: 0, va: vx * 0.003,
-              hw: Math.max(ox, w - ox) / S * 0.92, hh: Math.max(oy, h - oy) / S * 0.92, hits: 0, lastHit: -1, t: 0 };
-    cv.style.transition = 'none'; cv.style.opacity = 0;
-    mode = 'fly';
+// ---- 割れる: 厚みのある3Dの破片を作る ----
+// 胴の壁は「角度 × 高さ」の面でボロノイ分割し（ぶつかった所の近くほど細かく）、
+// 1つの区画ごとに外側の面・内側の面・断面（ふちに当たる所は口の上面）で閉じた立体にする。底は扇形に5つ
+function clipHalf(poly, a, b) {                  // 多角形を「a の側」（a と b の垂直二等分線の a 側）に切る
+  const nx = b[0] - a[0], ny = b[1] - a[1], m = (nx * (a[0] + b[0]) + ny * (a[1] + b[1])) / 2, out = [];
+  for (let k = 0; k < poly.length; k++) {
+    const p = poly[k], q = poly[(k + 1) % poly.length];
+    const dp = p[0] * nx + p[1] * ny - m, dq = q[0] * nx + q[1] * ny - m;
+    if (dp <= 0) out.push(p);
+    if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0)) { const t = dp / (dp - dq); out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]); }
   }
-  function stepFly(dt) {
-    const f = flyer;
-    f.t += dt; f.vy += G * dt; f.x += f.vx * dt; f.y += f.vy * dt; f.a += f.va * dt;
-    const c = Math.abs(Math.cos(f.a)), s = Math.abs(Math.sin(f.a));
-    const ex = c * f.hw + s * f.hh, ey = s * f.hw + c * f.hh;   // 回った壺の、左右・上下へのはみ出し
-    let hit = false;
-    if (f.x - ex < 0) { f.x = ex; f.vx = Math.abs(f.vx) * BOUNCE; hit = true; }
-    if (f.x + ex > W) { f.x = W - ex; f.vx = -Math.abs(f.vx) * BOUNCE; hit = true; }
-    if (f.y - ey < 0) { f.y = ey; f.vy = Math.abs(f.vy) * BOUNCE; hit = true; }
-    if (f.y + ey > H) { f.y = H - ey; f.vy = -Math.abs(f.vy) * BOUNCE; f.vx *= 0.9; hit = true; }
-    // 同じぶつかりで何度も数えないよう、0.15 秒あけて数える
-    if (hit && f.t - f.lastHit > 0.15) { f.hits++; f.lastHit = f.t; f.va = -f.va * 0.8 + (Math.random() - 0.5) * 6; }
-    if (f.hits >= BREAK_HITS || f.t > 3) shatter();
-  }
-  // 割れる: 絵をでこぼこの破片（ボロノイ分割）に切り分けて、ばらまく
-  function shatter() {
-    const f = flyer, NS = 26, seeds = [];
-    const data = f.sp.getContext('2d').getImageData(0, 0, f.w, f.h).data;
-    for (let k = 0; k < 4000 && seeds.length < NS; k++) {   // 壺が描かれている所にだけ種を置く
-      const x = Math.random() * f.w, y = Math.random() * f.h;
-      if (data[((y | 0) * f.w + (x | 0)) * 4 + 3] > 0) seeds.push([x, y]);
-    }
-    const ca = Math.cos(f.a), sa = Math.sin(f.a);
-    shards = [];
-    for (let i = 0; i < seeds.length; i++) {
-      let poly = [[0, 0], [f.w, 0], [f.w, f.h], [0, f.h]];
-      for (let j = 0; j < seeds.length && poly.length; j++) if (j !== i) poly = clipHalf(poly, seeds[i], seeds[j]);
-      if (poly.length < 3) continue;
-      let bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9, mx = 0, my = 0;
-      for (const [x, y] of poly) { bx0 = Math.min(bx0, x); by0 = Math.min(by0, y); bx1 = Math.max(bx1, x); by1 = Math.max(by1, y); mx += x; my += y; }
-      mx /= poly.length; my /= poly.length;
-      bx0 = Math.floor(bx0); by0 = Math.floor(by0);
-      const cw = Math.max(1, Math.ceil(bx1) - bx0), chh = Math.max(1, Math.ceil(by1) - by0);
-      const c = document.createElement('canvas'); c.width = cw; c.height = chh;
-      const g = c.getContext('2d');
-      g.beginPath(); poly.forEach(([x, y], k) => k ? g.lineTo(x - bx0, y - by0) : g.moveTo(x - bx0, y - by0)); g.closePath();
-      g.clip(); g.drawImage(f.sp, -bx0, -by0);
-      let rs = 0; for (const [x, y] of poly) rs = Math.max(rs, Math.hypot(x - mx, y - my));
-      // 破片の中心の画面での位置と、飛び散る速さ（壺の速さの一部＋中心から外へ）
-      const lx = (mx - f.ox) / S, ly = (my - f.oy) / S, ll = Math.hypot(lx, ly) || 1;
-      const wx = lx * ca - ly * sa, wy = lx * sa + ly * ca, kick = 180 + Math.random() * 320;
-      shards.push({ c, dx: (bx0 - mx) / S, dy: (by0 - my) / S, cw: cw / S, ch: chh / S, rs: rs / S,
-        x: f.x + wx, y: f.y + wy, a: f.a, va: (Math.random() - 0.5) * 14,
-        vx: f.vx * 0.35 + wx / ll * kick, vy: f.vy * 0.35 + wy / ll * kick - 250, rest: false });
-    }
-    pile = new Float32Array(Math.ceil(W / 4) + 2);   // 画面下にたまった破片の高さ（4px ごと）
-    flyer = null; restT = 0; waitT = 0; draining = false; mode = 'shards';
-    if (!shards.length) drain();                  // 念のため: 破片が1つも無ければ、すぐ次の筒へ
-  }
-  // 多角形 poly を「点 a の側」（a と b の垂直二等分線で分けた a 側）だけに切る
-  function clipHalf(poly, a, b) {
-    const nx = b[0] - a[0], ny = b[1] - a[1], m = (nx * (a[0] + b[0]) + ny * (a[1] + b[1])) / 2, out = [];
+  return out;
+}
+function pieceBuilder() {                        // 三角形を貯めて、破片1つ分の形にする
+  const pos = [], nor = [], typ = [];
+  const V3 = THREE.Vector3;
+  return {
+    pos, nor, typ,
+    // 法線 n が与えられたらその向きに、無ければ中心 pc から外へ向くように三角形の向きをそろえる
+    tri(a, b, c, na, nb, nc, ty, pc) {
+      const e1 = new V3().subVectors(b, a), e2 = new V3().subVectors(c, a), fn = new V3().crossVectors(e1, e2);
+      if (fn.lengthSq() < 1e-14) return;
+      let want;
+      if (na) want = new V3().add(na).add(nb).add(nc);
+      else { want = new V3().add(a).add(b).add(c).multiplyScalar(1 / 3).sub(pc); }
+      if (fn.dot(want) < 0) { [b, c] = [c, b]; [nb, nc] = [nc, nb]; fn.negate(); }
+      if (!na) { fn.normalize(); na = nb = nc = fn; }
+      for (const [p, n] of [[a, na], [b, nb], [c, nc]]) { pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); typ.push(ty); }
+    },
+  };
+}
+function fracture(impact) {                      // impact: 壺の中での、ぶつかった点（無ければ null）
+  const V3 = THREE.Vector3;
+  const yb = -0.5 + T, yt = 0.5;
+  let Rm = 0; for (let i = 0; i < N; i++) Rm += radius[i]; Rm /= N;
+  const Wd = 2 * Math.PI * Rm;
+  const rOut = y => rAt(0.5 - y), rIn = y => Math.max(rAt(0.5 - y) - T, 0.01);
+  const P = (x, y, inner) => { const r = inner ? rIn(y) : rOut(y), a = x / Rm; return new V3(r * Math.sin(a), y, r * Math.cos(a)); };
+  const Nr = (x, y, inner) => {                  // 外側・内側の面の向き（輪郭の傾きから）
+    const e = 0.004, drdy = (rOut(Math.min(yt, y + e)) - rOut(Math.max(-0.5, y - e))) / (2 * e);
+    let nr = 1, ny = -drdy; const l = Math.hypot(nr, ny); nr /= l; ny /= l;
+    if (inner) { nr = -nr; ny = -ny; }
+    const a = x / Rm; return new V3(nr * Math.sin(a), ny, nr * Math.cos(a));
+  };
+  // 種: ぶつかった所の近くに多め、残りは全体に散らす
+  const seeds = [];
+  let ix = Math.random() * Wd, iy = (yb + yt) / 2;
+  if (impact) { const a = Math.atan2(impact.x, impact.z); ix = ((a + Math.PI * 2) % (Math.PI * 2)) * Rm; iy = Math.min(yt, Math.max(yb, impact.y)); }
+  for (let k = 0; k < 9; k++) seeds.push([ix + (Math.random() - 0.5) * 0.22, Math.min(yt, Math.max(yb, iy + (Math.random() - 0.5) * 0.22))]);
+  for (let k = 0; k < 17; k++) seeds.push([Math.random() * Wd, yb + Math.random() * (yt - yb)]);
+  const pieces = [];
+  for (let i = 0; i < seeds.length; i++) {
+    const s = seeds[i];
+    let poly = [[s[0] - Wd / 2, yb], [s[0] + Wd / 2, yb], [s[0] + Wd / 2, yt], [s[0] - Wd / 2, yt]];
+    for (let j = 0; j < seeds.length && poly.length; j++)
+      for (const off of [-Wd, 0, Wd]) {
+        if (j === i && off === 0) continue;
+        poly = clipHalf(poly, s, [seeds[j][0] + off, seeds[j][1]]);
+        if (!poly.length) break;
+      }
+    if (poly.length < 3) continue;
+    // 面積（細すぎる区画は飛ばす）
+    let area = 0; for (let k = 0; k < poly.length; k++) { const p = poly[k], q = poly[(k + 1) % poly.length]; area += p[0] * q[1] - q[0] * p[1]; }
+    area = Math.abs(area) / 2;
+    if (area < 2e-4) continue;
+    let mx = 0, my = 0; for (const p of poly) { mx += p[0]; my += p[1]; } mx /= poly.length; my /= poly.length;
+    const pc = P(mx, my, false).add(P(mx, my, true)).multiplyScalar(0.5);
+    const B = pieceBuilder();
+    // 外側・内側の面: 中心から扇形に分け、さらに細かく割って曲面に沿わせる
     for (let k = 0; k < poly.length; k++) {
       const p = poly[k], q = poly[(k + 1) % poly.length];
-      const dp = p[0] * nx + p[1] * ny - m, dq = q[0] * nx + q[1] * ny - m;
-      if (dp <= 0) out.push(p);
-      if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0)) { const t = dp / (dp - dq); out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]); }
-    }
-    return out;
-  }
-  function pileAt(x) { return pile[Math.max(0, Math.min(pile.length - 1, Math.round(x / 4)))]; }
-  function stepShards(dt) {
-    let moving = 0;
-    for (const s of shards) {
-      if (s.rest) continue;
-      if (s.delay > 0) { s.delay -= dt; continue; }
-      moving++;
-      s.vy += G * dt; s.x += s.vx * dt; s.y += s.vy * dt; s.a += s.va * dt;
-      if (draining) continue;                       // 抜け落ちるとき: 床も壁もなく、そのまま画面の下へ
-      if (s.x < s.rs * 0.5) { s.x = s.rs * 0.5; s.vx = Math.abs(s.vx) * 0.5; }
-      if (s.x > W - s.rs * 0.5) { s.x = W - s.rs * 0.5; s.vx = -Math.abs(s.vx) * 0.5; }
-      const fy = H - pileAt(s.x) - s.rs * 0.3;   // 床（すでにたまった破片の上）
-      if (s.y > fy) {
-        s.y = fy;
-        if (s.vy > 260 && restT < 2.5) { s.vy = -s.vy * 0.3; s.vx *= 0.6; s.va *= 0.5; }
-        else {                                      // 止まって、山の高さを上げる
-          s.rest = true;
-          const ht = H - s.y + s.rs * 0.15;   // 山は低めに（破片は寝かせて重なる）
-          const i0 = Math.max(0, Math.round((s.x - s.rs * 0.7) / 4)), i1 = Math.min(pile.length - 1, Math.round((s.x + s.rs * 0.7) / 4));
-          for (let i = i0; i <= i1; i++) pile[i] = Math.max(pile[i], ht);
+      const L = Math.max(1, Math.ceil(Math.max(Math.hypot(p[0] - mx, p[1] - my), Math.hypot(q[0] - mx, q[1] - my), Math.hypot(q[0] - p[0], q[1] - p[1])) / 0.04));
+      const at = (u, v) => [mx + (p[0] - mx) * u / L + (q[0] - mx) * v / L, my + (p[1] - my) * u / L + (q[1] - my) * v / L];
+      for (let u = 0; u < L; u++) for (let v = 0; v < L - u; v++) {
+        const tris = [[at(u, v), at(u + 1, v), at(u, v + 1)]];
+        if (u + v + 1 < L) tris.push([at(u + 1, v), at(u + 1, v + 1), at(u, v + 1)]);
+        for (const [a, b, c] of tris) {
+          B.tri(P(a[0], a[1], false), P(b[0], b[1], false), P(c[0], c[1], false), Nr(a[0], a[1], false), Nr(b[0], b[1], false), Nr(c[0], c[1], false), 0);
+          B.tri(P(a[0], a[1], true), P(b[0], b[1], true), P(c[0], c[1], true), Nr(a[0], a[1], true), Nr(b[0], b[1], true), Nr(c[0], c[1], true), 2);
         }
       }
     }
-    if (draining) { shards = shards.filter(s => s.y - s.rs < H + 20); return; }   // 画面の下へ出たものは消す
-    restT += dt;
-    if (moving === 0 || restT > 4) {              // 全部たまったら、一息（0.9 秒）おいて抜け落ちる
-      waitT += dt;
-      if (waitT > 0.9) drain();
-    }
-  }
-  // 破片の山が下へ抜け落ちるのと同時に、上から次の筒が降ってくる
-  function drain() {
-    draining = true;
-    for (const s of shards) {
-      s.rest = false; s.delay = Math.random() * 0.12;   // 少しずつずれて落ち始める
-      s.vx = (Math.random() - 0.5) * 40; s.vy = Math.random() * 60; s.va = (Math.random() - 0.5) * 1.5;
-    }
-    nextPot();
-  }
-  function nextPot() {
-    let p; do p = PRESETS[Math.floor(Math.random() * PRESETS.length)]; while (p === preset && PRESETS.length > 1);
-    preset = p;
-    radius.fill(cylR());
-    cx = baseCx; top = -potH - 40; bottom = top + potH; dropV = 0;   // 画面の上の外から
-    buf.fill(0); ctx.clearRect(0, 0, cv.width, cv.height); prevBox = null;
-    cv.style.transition = 'none'; cv.style.opacity = 1;
-    mode = 'drop';
-  }
-  function drawFx() {
-    fctx.setTransform(1, 0, 0, 1, 0, 0);
-    fctx.clearRect(0, 0, fx.width, fx.height);
-    if (flyer) {
-      const f = flyer;
-      fctx.setTransform(S, 0, 0, S, 0, 0); fctx.translate(f.x, f.y); fctx.rotate(f.a);
-      fctx.drawImage(f.sp, -f.ox / S, -f.oy / S, f.w / S, f.h / S);
-    }
-    for (const s of shards) {
-      fctx.setTransform(S, 0, 0, S, 0, 0); fctx.translate(s.x, s.y); fctx.rotate(s.a);
-      fctx.drawImage(s.c, s.dx, s.dy, s.cw, s.ch);
-    }
-  }
-
-  // ---- 描画 ----
-  // 壺を、高さごとの薄い輪切り（見下ろしたのでだ円）の積み重ねとして描く。
-  // 見下ろしたとき、画面の1列で見えるのは「いちばん高い輪切り」なので、
-  // 上から下へ輪切りをたどり、まだ塗っていない所（前の輪切りの手前のふちより下）だけを塗る。
-  let SR = new Float32Array(0), SD = new Float32Array(0);
-  // 列ごとの「塗り済みの区間」と、輪切りごとの「すき間」の作業用（区間は数本で足りる）
-  const IMAX = 64, IA = new Float64Array(IMAX), IB = new Float64Array(IMAX);
-  const GMAX = 64, GA = new Float64Array(GMAX), GB = new Float64Array(GMAX);
-  // 区間 [a, b] を塗り済みに足して、重なる・接する区間を1本にまとめる。新しい本数を返す
-  function addSpan(n, a, b) {
-    let k = 0;
-    while (k < n && IB[k] < a) k++;                       // a より前で終わる区間はそのまま
-    let m = k;
-    while (m < n && IA[m] <= b) { if (IA[m] < a) a = IA[m]; if (IB[m] > b) b = IB[m]; m++; }  // 重なる区間を吸収
-    const removed = m - k;
-    if (removed === 0) {                                   // 間に差し込む
-      if (n >= IMAX) return n;
-      for (let i = n; i > k; i--) { IA[i] = IA[i - 1]; IB[i] = IB[i - 1]; }
-      IA[k] = a; IB[k] = b; return n + 1;
-    }
-    IA[k] = a; IB[k] = b;
-    for (let i = m; i < n; i++) { IA[i - removed + 1] = IA[i]; IB[i - removed + 1] = IB[i]; }
-    return n - removed + 1;
-  }
-  // 口のふち（玉縁）用: 列ごとの「その画素に描いた輪の高さ」
-  let LH = new Float32Array(0), LA = 0, LRC = 0, LBASE = 0, LLEN = 0;
-  function markLip(ya, yb, h) {          // 画素の中心が ya〜yb に入るものに高さ h を記録
-    const p1 = Math.min(LLEN - 1, Math.floor(yb - 0.5 - LBASE));
-    for (let p = Math.max(0, Math.ceil(ya - 0.5 - LBASE)); p <= p1; p++) LH[p] = h;
-  }
-  const CN = 768, CK = CN / 1.5, CT = new Float32Array(CN * 3), RT = new Float32Array(CN * 3);
-  // 計算を軽くする表: asin(x)×1.5 と sin
-  const AN = 2048, ASIN15 = new Float32Array(AN);
-  for (let i = 0; i < AN; i++) ASIN15[i] = 1.5 * Math.asin(i / (AN - 1) * 2 - 1);
-  const SN = 1024, SM = SN - 1, SK = SN / (2 * Math.PI), SIN = new Float32Array(SN);
-  for (let i = 0; i < SN; i++) SIN[i] = Math.sin(i / SK);
-  function colorAt(g, out, o) {  // 高さ g（0 = 口、1 = 底）の色を3色からなめらかに作る
-    g = g < 0 ? 0 : g > 1 ? 1 : g;
-    const P = preset.c, a = g < 0.5 ? P[0] : P[1], b = g < 0.5 ? P[1] : P[2];
-    let t = g < 0.5 ? g * 2 : g * 2 - 1;
-    t = t * t * (3 - 2 * t);
-    for (let k = 0; k < 3; k++) out[o + k] = a[k] + (b[k] - a[k]) * t;
-  }
-
-  // 面の向き n と、その場所の色（表の位置 co）から色を作る。結果は OUT に入る
-  // 陰はごく弱く（立体感は主にリムで出す）。リム（フレネル）は正面から輪郭へ向かって、
-  // 別の色（リムの色）へ置きかえていく。幅は広く、輪郭ではほぼリムの色だけになる。
-  // hz は横の向き（正面=1）。下を向いた面までリム一色にならないよう、N·V に半分まぜる
-  const OUT = [0, 0, 0];
-  function shade(nx, ny, nz, hz, co) {
-    const nl = nx * L[0] + ny * L[1] + nz * L[2];
-    const nv = nx * V[0] + ny * V[1] + nz * V[2];
-    const nh = nx * HV[0] + ny * HV[1] + nz * HV[2];
-    let w = (nl + 0.5) / 1.5; w = w > 0 ? w : 0;
-    const m = 0.9 + 0.15 * w;
-    let h = nh > 0 ? nh : 0; h *= h; h *= h;
-    const spec = 8 * h;
-    const nf = 0.55 * (nv > 0 ? nv : 0) + 0.45 * (hz > 0 ? hz : 0);
-    let t = (1 - nf - 0.06) / 0.62; t = t < 0 ? 0 : t > 1 ? 1 : t;
-    const fr = t * t * (3 - 2 * t), km = 1 - fr;
-    OUT[0] = (CT[co] * m + spec) * km + RT[co] * fr;
-    OUT[1] = (CT[co + 1] * m + spec) * km + RT[co + 1] * fr;
-    OUT[2] = (CT[co + 2] * m + spec) * km + RT[co + 2] * fr;
-  }
-
-  function render() {
-    const cw = cv.width, chh = cv.height, pBG = 0;
-    const Ls = Math.max(2, Math.round((bottom - top) * S));     // 輪切りの数（1画素に1枚）
-    if (SR.length < Ls + 1) { SR = new Float32Array(Ls + 1); SD = new Float32Array(Ls + 1); }
-    let maxR = 0;
-    for (let j = 0; j <= Ls; j++) { SR[j] = rAt(top + j / S) * S; if (SR[j] > maxR) maxR = SR[j]; }
-    for (let j = 0; j <= Ls; j++) {   // 半径の変わり方（下へ広がる所は上を向いた面）
-      const a = SR[j > 0 ? j - 1 : 0], b = SR[j < Ls ? j + 1 : Ls];
-      SD[j] = (b - a) / ((j > 0 && j < Ls) ? 2 : 1) / KC;
-    }
-
-    const box = { x0: Math.max(0, Math.floor(cx * S - maxR) - 2), x1: Math.min(cw, Math.ceil(cx * S + maxR) + 2),
-                  y0: Math.max(0, Math.floor(top * S - K * maxR - SR[0] * RIM * 0.5) - 2), y1: Math.min(chh, Math.ceil(bottom * S + K * maxR) + 2) };
-    if (box.y1 < box.y0) box.y1 = box.y0;       // 壺が画面の上の外にいるとき（降ってくる前）
-    const clear = prevBox ? { x0: Math.min(box.x0, prevBox.x0), x1: Math.max(box.x1, prevBox.x1), y0: Math.min(box.y0, prevBox.y0), y1: Math.max(box.y1, prevBox.y1) } : box;
-    for (let y = clear.y0; y < clear.y1; y++) buf.fill(pBG, y * cw + clear.x0, y * cw + clear.x1);
-
-    const pcx = cx * S, Y0 = top * S;
-    const r0 = SR[0], ri = r0 * (1 - RIM);
-    // ふちの玉縁: 断面の半円の半径 LA と、その中心の半径 LRC
-    LA = (r0 - ri) / 2; LRC = (r0 + ri) / 2;
-    LBASE = Math.floor(Y0 - LA - K * r0) - 2; LLEN = Math.ceil(2 * K * r0 + LA) + 6;
-    if (LH.length < LLEN) LH = new Float32Array(LLEN);
-    const topC = [0, 0, 0], MOUTH_CO = ((0.25 * CK) | 0) * 3;   // 口の高さ（g = 0）の色の位置
-    colorAt(0, topC, 0);
-    for (let i = 0; i < CN; i++) colorAt(i / CK - 0.25, CT, i * 3);   // 高さ → 色 の表
-    for (let i = 0; i < CN; i++) {                                     // 高さ → リムの色 の表
-      let g = i / CK - 0.25; g = g < 0 ? 0 : g > 1 ? 1 : g;
-      for (let k = 0; k < 3; k++) RT[i * 3 + k] = preset.r[0][k] + (preset.r[1][k] - preset.r[0][k]) * g;
-    }
-
-    for (let px = box.x0; px < box.x1; px++) {
-      const dx = px + 0.5 - pcx, adx = Math.abs(dx);
-      let n = 0;                               // この列でもう塗った範囲（上から順の区間、IA〜IB）の数
-
-      // 口: 中の暗がりと、丸いふち。ふちは断面が半円の「玉縁」で、胴の上端より少し盛り上がる。
-      // 半円を高さごとの薄い輪（だ円の帯）に分け、低い輪から順に描いて、高い輪が上に来るようにする。
-      // この列で、各画素に最後に描いた輪の高さを LH に記録し、あとでまとめて色をつける
-      if (adx < r0 + 0.5) {
-        const cov = Math.min(1, r0 - adx + 0.5);
-        LH.fill(-1, 0, LLEN);
-        let ytop = 1e9;
-        for (let h = 0; h <= LA + 1e-6; h += 0.5) {
-          const s = Math.sqrt(Math.max(0, LA * LA - h * h)), ro = LRC + s, rin = LRC - s;
-          if (adx >= ro) continue;
-          const so = K * Math.sqrt(ro * ro - dx * dx), Yc = Y0 - h;
-          if (Yc - so < ytop) ytop = Yc - so;
-          if (adx < rin) {
-            const si = K * Math.sqrt(rin * rin - dx * dx);
-            markLip(Yc - so, Yc - si, h); markLip(Yc + si, Yc + so, h);
-          } else markLip(Yc - so, Yc + so, h);
-        }
-        const siI = adx < ri ? K * Math.sqrt(ri * ri - dx * dx) : -1;   // 中（胴の上端の高さで見える口の内側）
-        const yb = Y0 + K * Math.sqrt(Math.max(0, r0 * r0 - dx * dx));
-        let lastH = LA;
-        for (let py = Math.max(box.y0, Math.ceil(ytop - 0.5)); py + 0.5 <= yb && py < box.y1; py++) {
-          const y = py + 0.5;
-          let h = LH[py - LBASE];
-          const inside = siI >= 0 && y > Y0 - siI && y < Y0 + siI;
-          if (h < 0 && !inside) h = lastH;      // 輪と輪のすき間に落ちた画素は、すぐ上の画素の高さを使う
-          let r, g, b;
-          // 粒: 真上から見た角度と、中心からの距離で決める（回転と一緒に回る）
-          const zz = (y - Y0 + (h > 0 ? h : 0)) / K, rr = Math.sqrt(dx * dx + zz * zz) || 1;
-          const gn = GRAIN[(((rr * 0.5) | 0) & (GH - 1)) * GW + ((((Math.atan2(dx, zz) + phase) * GK) | 0) & (GW - 1))];
-          if (h < 0) {
-            // 中: 手前の壁の内側ほど少し暗い（最大で2割）
-            const f = (y - (Y0 - siI)) / (2 * siI);
-            const lv = 0.8 + 0.2 * (1 - f) * (1 - f);
-            r = topC[0] * lv; g = topC[1] * lv; b = topC[2] * lv;
-          } else {
-            lastH = h;
-            // 面の向き: 半円の中心から見た向き。外側は外向き、てっぺんは上向き、内側は内向き
-            const q = rr - LRC, ln = Math.sqrt(q * q + h * h) || 1, ct = h / ln, st = q / ln;
-            shade(st * dx / rr, ct, st * zz / rr, Math.min(1, ct + st) * zz / rr, MOUTH_CO);
-            r = OUT[0]; g = OUT[1]; b = OUT[2];
-          }
-          r += gn; g += gn; b += gn;
-          if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; g = BG[1] + (g - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
-          buf[py * cw + px] = pack(r, g, b);
-        }
-        if (cov >= 1) { IA[0] = ytop; IB[0] = yb; n = 1; }
-      }
-
-      // 胴: 上から下へ。各輪切りは、まだ塗っていない所だけが見える
-      for (let j = 1; j <= Ls; j++) {
-        const rj = SR[j];
-        if (rj + 0.5 <= adx) continue;
-        const s = Math.sqrt(Math.max(0, rj * rj - dx * dx));
-        const Yj = Y0 + j;
-        const yf = Yj + K * s, yt = Yj - K * s;
-        // この輪切りが画面で占める範囲（だ円の奥の上端 yt 〜 手前のふち yf）のうち、
-        // まだ塗っていない「すき間」だけが見える（塗り済みの所には、もっと高い輪切りが見えている）
-        let g = 0, cur = yt;
-        for (let k = 0; k < n && g < GMAX; k++) {
-          if (IB[k] <= cur) continue;
-          if (IA[k] >= yf) break;
-          if (IA[k] > cur) { GA[g] = cur; GB[g] = IA[k]; g++; }
-          cur = IB[k];
-        }
-        if (cur < yf && g < GMAX) { GA[g] = cur; GB[g] = yf; g++; }
-        let paint = false;
-        for (let k = 0; k < g; k++) if (Math.floor(GB[k] - 0.5) >= Math.floor(GA[k] - 0.5) + 1) { paint = true; break; }
-        if (paint) {
-          // 表面の向き（法線）: 横は回転体の角度、縦は半径の変わり方から
-          const sp = rj > 0 ? Math.max(-1, Math.min(1, dx / rj)) : 0, cp = Math.sqrt(1 - sp * sp);
-          const d = SD[j], il = 1 / Math.sqrt(1 + d * d);
-          const nx = sp * il, ny = d * il, nz = cp * il;
-          // 色: 高さで3色。回転に合わせて色の帯が少し横へ流れる
-          const ang = ASIN15[((sp + 1) * 0.5 * (AN - 1)) | 0];   // 回転体の角度×1.5
-          const sw = SIN[((ang + phase) * SK) & SM];
-          const ci = (((j / Ls + SWIRL * sw) + 0.25) * CK) | 0;   // 色の表は g = -0.25〜1.25
-          const co = (ci < 0 ? 0 : ci >= CN ? CN - 1 : ci) * 3;
-          shade(nx, ny, nz, cp, co);
-          // 粒: 表面の角度（回転で流れる）と高さで決める。輪郭に近いほど粒が横につぶれて、回り込みが見える
-          const gn = GRAIN[((((j + 400) >> 1) & (GH - 1)) * GW) + ((((ang / 1.5 + phase) * GK) | 0) & (GW - 1))];
-          let r = OUT[0] + gn, gg = OUT[1] + gn, b = OUT[2] + gn;
-          const cov = Math.min(1, rj - adx + 0.5);
-          if (cov < 1) { r = BG[0] + (r - BG[0]) * cov; gg = BG[1] + (gg - BG[1]) * cov; b = BG[2] + (b - BG[2]) * cov; }
-          const c = pack(r, gg, b);
-          for (let k = 0; k < g; k++) {        // 画素の中心が (GA, GB] に入るものを塗る
-            const p0 = Math.max(box.y0, Math.floor(GA[k] - 0.5) + 1), p1 = Math.min(box.y1 - 1, Math.floor(GB[k] - 0.5));
-            for (let py = p0; py <= p1; py++) buf[py * cw + px] = c;
-          }
-        }
-        // 輪郭で半分だけかかった輪切り（背景と混ぜて薄く塗った所）は「塗り済み」にしない。
-        // 下にしっかりかかる輪切りがあれば上から塗り直し、無ければ薄い色のまま輪郭のぼかしになる
-        if (rj - adx + 0.5 >= 1 && g > 0) n = addSpan(n, yt, yf);
+    // 断面（外側と内側をつなぐ壁）。口の上端に当たる辺は、口の上面
+    for (let k = 0; k < poly.length; k++) {
+      const p = poly[k], q = poly[(k + 1) % poly.length];
+      const top = p[1] > yt - 1e-6 && q[1] > yt - 1e-6;
+      const S = Math.max(1, Math.ceil(Math.hypot(q[0] - p[0], q[1] - p[1]) / 0.04));
+      for (let j = 0; j < S; j++) {
+        const a = [p[0] + (q[0] - p[0]) * j / S, p[1] + (q[1] - p[1]) * j / S], b = [p[0] + (q[0] - p[0]) * (j + 1) / S, p[1] + (q[1] - p[1]) * (j + 1) / S];
+        const oa = P(a[0], a[1], false), ob = P(b[0], b[1], false), ia = P(a[0], a[1], true), ib = P(b[0], b[1], true);
+        B.tri(oa, ob, ib, null, null, null, top ? 1 : 4, pc); B.tri(oa, ib, ia, null, null, null, top ? 1 : 4, pc);
       }
     }
-    ctx.putImageData(img, 0, 0, clear.x0, clear.y0, clear.x1 - clear.x0, clear.y1 - clear.y0);
-    prevBox = box;
+    // 当たり判定は軽い球の集まり: 区画の角（最大6つ）と中心に、壁の厚みほどの球を置く（外側と内側の中間）
+    const Mid = (x, y) => P(x, y, false).add(P(x, y, true)).multiplyScalar(0.5);
+    const balls = [Mid(mx, my)], step = Math.max(1, Math.ceil(poly.length / 6));
+    for (let k = 0; k < poly.length; k += step) balls.push(Mid(mx + (poly[k][0] - mx) * 0.85, my + (poly[k][1] - my) * 0.85));
+    pieces.push({ B, balls, mass: Math.min(1, Math.max(0.02, area * 6)) });
   }
-
-  function frame(now) { step(now); requestAnimationFrame(frame); }
-  function step(now) {
-    const dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
-    lastT = now;
-    phase += dt * SPIN;                // 回り続けるので毎フレーム描く
-    updateView(dt);
-    if (mode === 'back') {             // つかんだけど投げなかった: 元の位置へなめらかに戻る
-      const k = 1 - Math.exp(-dt * 14);
-      cx += (baseCx - cx) * k; top += (baseTop - top) * k; bottom = top + potH;
-      if (Math.abs(cx - baseCx) < 0.3 && Math.abs(top - baseTop) < 0.3) { cx = baseCx; top = baseTop; bottom = top + potH; mode = 'shape'; }
+  // 底: 扇形に5つ
+  const KB = 5, a0 = Math.random() * Math.PI * 2, cuts = [];
+  for (let k = 0; k < KB; k++) cuts.push(a0 + (k + (Math.random() - 0.5) * 0.5) * Math.PI * 2 / KB);
+  for (let k = 0; k < KB; k++) {
+    const A0 = cuts[k], A1 = k + 1 < KB ? cuts[k + 1] : cuts[0] + Math.PI * 2;
+    const B = pieceBuilder(), S = Math.max(2, Math.ceil((A1 - A0) / (Math.PI * 2 / 48)));
+    const rT = rOut(yb), rB = rOut(-0.5), am = (A0 + A1) / 2;
+    const pc = new V3(Math.sin(am) * rB * 0.5, -0.5 + T / 2, Math.cos(am) * rB * 0.5);
+    const ring = (r, y, a) => new V3(r * Math.sin(a), y, r * Math.cos(a));
+    const cT = new V3(0, yb, 0), cB = new V3(0, -0.5, 0), up = new V3(0, 1, 0), dn = new V3(0, -1, 0);
+    for (let j = 0; j < S; j++) {
+      const a = A0 + (A1 - A0) * j / S, b = A0 + (A1 - A0) * (j + 1) / S;
+      const ta = ring(rT, yb, a), tb = ring(rT, yb, b), ba = ring(rB, -0.5, a), bb = ring(rB, -0.5, b);
+      B.tri(cT, ta, tb, up, up, up, 2); B.tri(cB, ba, bb, dn, dn, dn, 3);
+      const na = new V3(Math.sin(a), 0, Math.cos(a)), nb = new V3(Math.sin(b), 0, Math.cos(b));
+      B.tri(ba, bb, tb, na, nb, nb, 0); B.tri(ba, tb, ta, na, nb, na, 0);
     }
-    if (mode === 'drop') {             // 次の筒が上から降ってきて、元の位置で小さく弾んで止まる
-      dropV += G * dt; top += dropV * dt;
-      if (top >= baseTop) { top = baseTop; if (dropV > 500) dropV = -dropV * 0.22; else { dropV = 0; mode = 'shape'; } }
-      bottom = top + potH;
+    for (const a of [A0, A1]) {
+      const t = ring(rT, yb, a), b = ring(rB, -0.5, a);
+      B.tri(cB, b, t, null, null, null, 4, pc); B.tri(cB, t, cT, null, null, null, 4, pc);
     }
-    if (mode === 'fly') stepFly(dt);
-    if (shards.length) stepShards(dt);
-    if (mode === 'shape' || mode === 'grab' || mode === 'back' || mode === 'drop') render();
-    if (flyer || shards.length || fxDirty) { drawFx(); fxDirty = !!(flyer || shards.length); }
+    const yc = -0.5 + T / 2, balls = [new V3(0, yc, 0)];
+    for (const a of [A0, am, A1]) balls.push(ring(rB * 0.85, yc, a), ring(rB * 0.45, yc, a));
+    pieces.push({ B, balls, mass: Math.min(1, Math.max(0.05, (A1 - A0) / 2 * rB * rB * 8)) });
   }
+  return pieces;
+}
 
-  // 説明シートを閉じたら、ヒントを出す
-  // ---- スマホの傾きで、少し覗き込む ----
-  // 前後の傾き → 見下ろし具合（K0 ± KR）、左右の傾き → 光の向き（最大 ±LROT ラジアン）。
-  // 「いまの持ち方」を基準にして、基準はゆっくり（約4秒）いまの傾きへ寄るので、傾けた動きだけが効く
-  const K0 = 0.28, KR = 0.12, LROT = 0.5, TMAX = 25;   // TMAX = これだけ傾けると最大（度）
-  let tiltB = null, tiltG = 0, baseB = 0, baseG = 0, tK = K0, tL = 0;
-  addEventListener('deviceorientation', e => {
-    if (e.beta == null || e.gamma == null) return;
-    if (tiltB === null) { baseB = e.beta; baseG = e.gamma; }
-    tiltB = e.beta; tiltG = e.gamma;
+// ---- 状態 ----
+// mode: shape = 形を作る / grab = 長押しでつかんでいる / back = 元の位置へ戻る /
+//       fly = 投げた壺が跳ね回る / shards = 割れた破片がたまる / drop = 次の筒が降ってくる
+let mode = 'shape', grab = null, potBody = null, flyT = 0, hits = 0, lastHit = -1, lastImpact = null, breakNow = false;
+let shards = [], restT = 0, waitT = 0, draining = false, dropV = 0, spin = 0, shardMat = null;
+
+function throwPot(vx, vy) {                      // vx, vy: 画面の上で指が動いた速さ（px/秒）
+  const ppu = H / VIS_H;
+  const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+  const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+  const v = right.multiplyScalar(vx / ppu).add(up.multiplyScalar(-vy / ppu));
+  // ろくろの回転を、壺そのものの向きに焼きこむ
+  potGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), spin));
+  spin = 0; potMesh.rotation.y = 0;
+  const pts = [];
+  for (let k = 0; k < 12; k++) for (let j = 0; j <= 10; j++) {
+    const a = k / 12 * Math.PI * 2, t = j / 10, r = rAt(t);
+    pts.push(new THREE.Vector3(r * Math.sin(a), 0.5 - t, r * Math.cos(a)));
+  }
+  potBody = new CANNON.Body({ mass: 1, material: mPot, shape: convexShape(pts), allowSleep: false });
+  potBody.position.copy(potGroup.position); potBody.quaternion.copy(potGroup.quaternion);
+  potBody.velocity.set(v.x, v.y, v.z);
+  // 回転: ろくろの回転＋指の向きに転がる回転
+  const tumble = new THREE.Vector3(0, 0, 1).cross(v).multiplyScalar(-1.2);
+  potBody.angularVelocity.set(tumble.x, SPIN + tumble.y, tumble.z);
+  potBody.addEventListener('collide', e => {
+    const iv = Math.abs(e.contact.getImpactVelocityAlongNormal());
+    if (iv < 1.0 || flyT - lastHit < 0.12) return;
+    lastHit = flyT; hits++;
+    const c = e.contact, pt = new CANNON.Vec3();
+    if (c.bi === potBody) potBody.position.vadd(c.ri, pt); else potBody.position.vadd(c.rj, pt);
+    lastImpact = pt;
+    if (hits >= 3 || iv > 9) breakNow = true;      // 3回ぶつかるか、強くぶつかったら割れる
   });
-  function updateView(dt) {
-    if (tiltB !== null) {
-      const a = 1 - Math.exp(-dt / 4);
-      baseB += (tiltB - baseB) * a; baseG += (tiltG - baseG) * a;
-      const db = Math.max(-TMAX, Math.min(TMAX, tiltB - baseB)), dg = Math.max(-TMAX, Math.min(TMAX, tiltG - baseG));
-      tK = K0 - db / TMAX * KR;          // 上側を奥へ倒す（beta が減る）ほど、上から口の中を覗く
-      tL = dg / TMAX * LROT;
-    }
-    const k = 1 - Math.exp(-dt * 8);     // 手ぶれが出ないよう、なめらかに追いかける
-    if (Math.abs(tK - K) > 1e-4 || Math.abs(tL - lAng) > 1e-4) setView(K + (tK - K) * k, lAng + (tL - lAng) * k);
+  world.addBody(potBody);
+  flyT = 0; hits = 0; lastHit = -1; breakNow = false; lastImpact = null;
+  mode = 'fly';
+}
+function shatter() {
+  const local = lastImpact ? potBody.pointToLocalFrame(lastImpact) : null;
+  const pieces = fracture(local ? new THREE.Vector3(local.x, local.y, local.z) : null);
+  shardMat = potMat.clone(); applyPreset(shardMat, preset);
+  const impactW = lastImpact ? new THREE.Vector3(lastImpact.x, lastImpact.y, lastImpact.z) : new THREE.Vector3().copy(potBody.position);
+  for (const pc of pieces) {
+    const { pos, nor, typ } = pc.B;
+    if (pos.length < 9) continue;
+    // 破片の中心（頂点の平均）を原点にする
+    let cx = 0, cy = 0, cz = 0; const nv = pos.length / 3;
+    for (let k = 0; k < pos.length; k += 3) { cx += pos[k]; cy += pos[k + 1]; cz += pos[k + 2]; }
+    cx /= nv; cy /= nv; cz /= nv;
+    const lp = new Float32Array(pos.length);
+    for (let k = 0; k < pos.length; k += 3) { lp[k] = pos[k] - cx; lp[k + 1] = pos[k + 1] - cy; lp[k + 2] = pos[k + 2] - cz; }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(lp, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nor), 3));
+    geo.setAttribute('aOrig', new THREE.BufferAttribute(new Float32Array(pos), 3));
+    geo.setAttribute('aType', new THREE.BufferAttribute(new Float32Array(typ), 1));
+    const mesh = new THREE.Mesh(geo, shardMat); mesh.frustumCulled = false;
+    const body = new CANNON.Body({ mass: pc.mass, material: mShard });
+    const ball = new CANNON.Sphere(T * 0.6);
+    for (const q of pc.balls) body.addShape(ball, new CANNON.Vec3(q.x - cx, q.y - cy, q.z - cz));
+    body.sleepSpeedLimit = 0.12; body.sleepTimeLimit = 0.4;
+    const wp = potBody.pointToWorldFrame(new CANNON.Vec3(cx, cy, cz));
+    body.position.copy(wp); body.quaternion.copy(potBody.quaternion);
+    // 速さ: 割れた瞬間の壺の、その点の速さ（並進＋回転）に、ぶつかった所から外へ散る分を足す
+    const v = potBody.getVelocityAtWorldPoint(wp, new CANNON.Vec3());
+    const away = new THREE.Vector3(wp.x - impactW.x, wp.y - impactW.y, wp.z - impactW.z);
+    const dist = away.length(); away.normalize().multiplyScalar(2.2 * Math.exp(-dist / 0.35) + 0.4);
+    body.velocity.set(v.x * 0.6 + away.x + (Math.random() - 0.5) * 0.4, v.y * 0.6 + away.y + Math.random() * 0.6, v.z * 0.6 + away.z + (Math.random() - 0.5) * 0.4);
+    body.angularVelocity.set(potBody.angularVelocity.x + (Math.random() - 0.5) * 8, potBody.angularVelocity.y + (Math.random() - 0.5) * 8, potBody.angularVelocity.z + (Math.random() - 0.5) * 8);
+    world.addBody(body); scene.add(mesh);
+    shards.push({ body, mesh });
   }
+  world.removeBody(potBody); potBody = null;
+  potGroup.visible = false;
+  restT = 0; waitT = 0; draining = false;
+  mode = 'shards';
+  if (!shards.length) drain();
+}
+function stepShards(dt) {
+  if (draining) {                                // 抜け落ちる: 床が無いので画面の下へ。外へ出たら消す
+    shards = shards.filter(s => {
+      if (s.body.position.y > floorY - 2.5) return true;
+      world.removeBody(s.body); scene.remove(s.mesh); s.mesh.geometry.dispose(); return false;
+    });
+    if (!shards.length) { if (!walls.includes(floorBody)) buildArena(); draining = false; }
+    return;
+  }
+  restT += dt;
+  const still = shards.every(s => s.body.sleepState === CANNON.Body.SLEEPING || s.body.velocity.length() < 0.15);
+  if (still || restT > 4) {                      // 全部たまったら、一息（0.9 秒）おいて抜け落ちる
+    waitT += dt;
+    if (waitT > 0.9) drain();
+  }
+}
+function drain() {                               // 床を外して破片を落とすのと同時に、上から次の筒
+  draining = true;
+  world.removeBody(floorBody); walls = walls.filter(b => b !== floorBody);
+  for (const s of shards) { s.body.wakeUp(); s.body.allowSleep = false; }
+  nextPot();
+}
+function nextPot() {
+  let p; do p = PRESETS[Math.floor(Math.random() * PRESETS.length)]; while (p === preset && PRESETS.length > 1);
+  preset = p; applyPreset(potMat, preset);
+  radius.fill(cylR()); shapeDirty = true;
+  potGroup.position.set(0, ceilY + 0.9, 0); potGroup.quaternion.identity(); potGroup.visible = true;
+  dropV = 0; mode = 'drop';
+}
 
-  document.getElementById('go').onclick = () => {
-    // iPhone は傾きセンサーの許可がいる（ボタンを押したときにしか聞けない）
-    if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
-      DeviceOrientationEvent.requestPermission().catch(() => {});
-    }
-    document.getElementById('start').classList.add('hide');
-    hint.classList.remove('hide');
-  };
+// ---- 画面の座標と世界の座標 ----
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function toScreen(v) { const p = v.clone().project(camera); return { x: (p.x + 1) / 2 * W, y: (1 - p.y) / 2 * H }; }
+function screenToPlane(x, y, plane) {
+  ndc.set(x / W * 2 - 1, -(y / H) * 2 + 1); ray.setFromCamera(ndc, camera);
+  return ray.ray.intersectPlane(plane, new THREE.Vector3()) || new THREE.Vector3();
+}
+function potScreen() {                           // 止まっている壺の、軸の上端・下端・中心（画面 px）
+  const a = toScreen(new THREE.Vector3(0, 0.5, 0)), b = toScreen(new THREE.Vector3(0, -0.5, 0));
+  return { cx: (a.x + b.x) / 2, top: a.y, bottom: b.y, ppu: H / VIS_H };
+}
 
-  addEventListener('resize', layout);
-  layout();
-  requestAnimationFrame(frame);
-  window.__pot = { radius, render, get top() { return top; }, get bottom() { return bottom; }, get cx() { return cx; },
-                   get mode() { return mode; }, get shards() { return shards; }, throwPot, step };
-})();
+// ---- 指 ----
+const HOLD_MS = 450, HOLD_MOVE = 8;              // 長押しの時間と、そのあいだ動いてもよい幅（px）
+const pointers = new Map();
+canvas.addEventListener('pointerdown', e => {
+  if (mode !== 'shape') return;
+  const s = potScreen();
+  if (e.clientY < s.top - 40 || e.clientY > s.bottom + 40) return;
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  const p = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, timer: 0 };
+  p.timer = setTimeout(() => startGrab(e.pointerId, p), HOLD_MS);
+  pointers.set(e.pointerId, p);
+  hint.classList.add('hide');
+});
+function startGrab(id, p) {
+  if (mode !== 'shape' || p.moved || pointers.get(id) !== p) return;
+  const s = potScreen(), t = Math.min(1, Math.max(0, (p.y - s.top) / (s.bottom - s.top)));
+  if (Math.abs(p.x - s.cx) > rAt(t) * s.ppu + 24) return;   // つかめるのは壺の上を押しているときだけ
+  mode = 'grab';
+  for (const [k, q] of pointers) if (k !== id) { clearTimeout(q.timer); pointers.delete(k); }
+  const dir = camera.getWorldDirection(new THREE.Vector3());
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(dir, potGroup.position);
+  const off = potGroup.position.clone().sub(screenToPlane(p.x, p.y, plane));
+  potGroup.position.y += 0.03;                   // 少し持ち上がる
+  grab = { id, plane, off, hist: [{ x: p.x, y: p.y, t: performance.now() }] };
+  if (navigator.vibrate) navigator.vibrate(12);
+}
+canvas.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  if (mode === 'grab') {
+    if (grab.id !== e.pointerId) return;
+    const w = screenToPlane(e.clientX, e.clientY, grab.plane).add(grab.off);
+    // 壺の中心は画面（箱）の中に収める
+    potGroup.position.set(Math.min(halfW, Math.max(-halfW, w.x)), Math.min(ceilY, Math.max(floorY, w.y)), w.z);
+    const t = performance.now();
+    grab.hist.push({ x: e.clientX, y: e.clientY, t });
+    while (grab.hist.length > 2 && t - grab.hist[0].t > 100) grab.hist.shift();
+    return;
+  }
+  if (mode !== 'shape') return;
+  if (!p.moved && Math.hypot(e.clientX - p.x0, e.clientY - p.y0) > HOLD_MOVE) { p.moved = true; clearTimeout(p.timer); }
+  // 押した瞬間の位置から「ふち」を動かす。指の横の移動量だけ、ふちが内／外へ動く
+  const s = potScreen();
+  const dx = (Math.abs(e.clientX - s.cx) - Math.abs(p.x - s.cx)) / s.ppu;
+  const t = Math.min(1, Math.max(0, (e.clientY - s.top) / (s.bottom - s.top)));
+  push(t, rAt(t) + dx);
+  p.x = e.clientX; p.y = e.clientY;
+});
+const up = e => {
+  const p = pointers.get(e.pointerId);
+  if (p) clearTimeout(p.timer);
+  pointers.delete(e.pointerId);
+  if (mode === 'grab' && grab && grab.id === e.pointerId) {
+    // 最後の 0.1 秒の指の速さで投げる。ほとんど動いていなければ元の位置へ戻す
+    const h = grab.hist, a = h[0], b = h[h.length - 1], dt = Math.max(16, performance.now() - a.t) / 1000;
+    let vx = (b.x - a.x) / dt, vy = (b.y - a.y) / dt;
+    const sp = Math.hypot(vx, vy), MAXV = 4200;
+    if (sp > MAXV) { vx *= MAXV / sp; vy *= MAXV / sp; }
+    grab = null;
+    if (sp < 250) mode = 'back'; else throwPot(vx, vy);
+  }
+};
+canvas.addEventListener('pointerup', up);
+canvas.addEventListener('pointercancel', up);
+
+// ---- スマホの傾きで、上・下・横から覗き込む ----
+// 前後の傾き → カメラの高さ（下から約 -20° 〜 上から約 50°）、左右の傾き → 横へ回り込む（約 ±40°）。
+// 「いまの持ち方」を基準にし、基準はゆっくり（約4秒）いまの傾きへ寄るので、傾けた動きだけが効く
+const EL0 = 16 * Math.PI / 180, EL_UP = 34 * Math.PI / 180, EL_DN = 36 * Math.PI / 180, AZ_R = 40 * Math.PI / 180, TMAX = 25;
+let tiltB = null, tiltG = 0, baseB = 0, baseG = 0, tEl = EL0, tAz = 0, el = EL0, az = 0;
+addEventListener('deviceorientation', e => {
+  if (e.beta == null || e.gamma == null) return;
+  if (tiltB === null) { baseB = e.beta; baseG = e.gamma; }
+  tiltB = e.beta; tiltG = e.gamma;
+});
+function updateView(dt) {
+  if (tiltB !== null) {
+    const a = 1 - Math.exp(-dt / 4);
+    baseB += (tiltB - baseB) * a; baseG += (tiltG - baseG) * a;
+    const xb = -Math.max(-TMAX, Math.min(TMAX, tiltB - baseB)) / TMAX;   // 上側を奥へ倒すと + （上から覗く）
+    const xg = Math.max(-TMAX, Math.min(TMAX, tiltG - baseG)) / TMAX;
+    tEl = EL0 + (xb > 0 ? EL_UP : EL_DN) * xb; tAz = AZ_R * xg;
+  }
+  const k = 1 - Math.exp(-dt * 8);               // 手ぶれが出ないよう、なめらかに追いかける
+  el += (tEl - el) * k; az += (tAz - az) * k;
+  camera.position.set(TARGET.x + DIST * Math.sin(az) * Math.cos(el), TARGET.y + DIST * Math.sin(el), TARGET.z + DIST * Math.cos(az) * Math.cos(el));
+  camera.lookAt(TARGET);
+  camera.updateMatrixWorld();
+}
+
+// ---- 毎フレーム ----
+let lastT = 0, paused = false, physMs = 0;   // paused / physMs は試験用（自分でコマを進める・物理の重さを測る）
+function frame(now) { if (!paused) step(now); requestAnimationFrame(frame); }
+function step(now) {
+  const dt = lastT ? Math.max(0, Math.min(0.05, (now - lastT) / 1000)) : 0;
+  lastT = now;
+  updateView(dt);
+  if (mode === 'shape' || mode === 'grab' || mode === 'back' || mode === 'drop') { spin += dt * SPIN; potMesh.rotation.y = spin; }
+  if (mode === 'back') {                         // つかんだけど投げなかった: 元の位置へなめらかに戻る
+    const k = 1 - Math.exp(-dt * 14);
+    potGroup.position.multiplyScalar(1 - k);
+    if (potGroup.position.length() < 0.002) { potGroup.position.set(0, 0, 0); mode = 'shape'; }
+  }
+  if (mode === 'drop') {                         // 次の筒が上から降ってきて、元の位置で小さく弾んで止まる
+    dropV -= G * dt; potGroup.position.y += dropV * dt;
+    if (potGroup.position.y <= 0) { potGroup.position.y = 0; if (dropV < -1.2) dropV = -dropV * 0.22; else { dropV = 0; mode = 'shape'; } }
+  }
+  if (dt > 0 && (potBody || shards.length)) { const t0 = performance.now(); world.step(1 / 120, dt, 8); physMs = physMs * 0.9 + (performance.now() - t0) * 0.1; }
+  if (mode === 'fly') {
+    flyT += dt;
+    potGroup.position.copy(potBody.position); potGroup.quaternion.copy(potBody.quaternion);
+    if (breakNow || flyT > 3) shatter();
+  }
+  for (const s of shards) { s.mesh.position.copy(s.body.position); s.mesh.quaternion.copy(s.body.quaternion); }
+  if (shards.length) stepShards(dt);
+  if (shapeDirty) updatePotGeometry();
+  renderer.render(scene, camera);
+}
+
+function layout() {
+  W = innerWidth || 1; H = innerHeight || 1; aspect = W / H;
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+  renderer.setSize(W, H, false);
+  camera.aspect = aspect; camera.updateProjectionMatrix();
+  const first = rMax === 0.4 && radius[0] === 0;
+  T = 0.14 * cylR();
+  rMax = 0.44 * VIS_H * aspect; rMin = Math.max(0.035 * VIS_H * aspect, T + 0.012);
+  if (first) radius.fill(cylR());
+  else for (let i = 0; i < N; i++) radius[i] = Math.min(rMax, Math.max(rMin, radius[i]));
+  shapeDirty = true;
+  buildArena();
+}
+
+// 説明シートを閉じたら、ヒントを出す。iPhone は傾きセンサーの許可がいる（ボタンを押したときにしか聞けない）
+document.getElementById('go').onclick = () => {
+  if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().catch(() => {});
+  }
+  document.getElementById('start').classList.add('hide');
+  hint.classList.remove('hide');
+};
+
+addEventListener('resize', layout);
+layout();
+updateView(0);
+requestAnimationFrame(frame);
+window.__pot = {
+  radius, step, throwPot, get physMs() { return physMs; }, set paused(v) { paused = v; lastT = 0; },
+  get mode() { return mode; }, get shards() { return shards; },
+  get cx() { return potScreen().cx; }, get top() { return potScreen().top; }, get bottom() { return potScreen().bottom; },
+};
 </script>
 </body>
 </html>
