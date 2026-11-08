@@ -83,7 +83,7 @@ button {
       <text x="292" y="124" text-anchor="end" stroke="none">pull</text>
       <text x="200" y="4" stroke="none">spin</text>
     </svg>
-    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. Press and hold, then swipe to throw it: it bounces, breaks, and a new one drops in. The colours are picked at random each time.</p>
+    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. Tilt the phone to peek inside. Press and hold, then swipe to throw it: it bounces, breaks, and a new one drops in. The colours are picked at random each time.</p>
     <div class="choose">
       <button id="go"><span>Start</span><span aria-hidden="true">&rarr;</span></button>
     </div>
@@ -109,11 +109,20 @@ button {
   const N = 160;                 // 輪郭の分割数（高さ方向）
   const radius = new Float32Array(N);
 
-  // 見下ろす角度: 口のだ円のつぶれ具合（0 = 真横、1 = 真上）
-  const K = 0.28, KC = Math.sqrt(1 - K * K);
+  // 見下ろす角度: 口のだ円のつぶれ具合（0 = 真横、1 = 真上）。スマホの傾きで少し変わる（setView）
+  let K = 0.28, KC = Math.sqrt(1 - K * K);
   const RIM = 0.14;              // 口のふちの厚み（半径に対する割合）
   // 光（左上手前から）と、見る向き、その中間（ハイライト用）
-  const L = norm([-0.45, 0.65, 0.6]), V = [0, K, KC], HV = norm([L[0] + V[0], L[1] + V[1], L[2] + V[2]]);
+  // 光は左右の傾きで縦の軸のまわりに少し回る（lAng）
+  const L0 = norm([-0.45, 0.65, 0.6]);
+  let L = L0, V = [0, K, KC], HV = L0, lAng = 0;
+  function setView(k, la) {
+    K = k; KC = Math.sqrt(1 - K * K); lAng = la;
+    const c = Math.cos(la), s = Math.sin(la);
+    L = norm([L0[0] * c + L0[2] * s, L0[1], -L0[0] * s + L0[2] * c]);
+    V = [0, K, KC]; HV = norm([L[0] + V[0], L[1] + V[1], L[2] + V[2]]);
+  }
+  setView(K, 0);
   // 回転: 色の帯が表面ごと少し回って見える。SPIN は1秒あたりの回転量、SWIRL はその強さ
   const SPIN = 1.6, SWIRL = 0.07;
   // 表面に貼りついた粒（グレイン）。回転と一緒に流れて、回っている感じを出す。
@@ -590,6 +599,7 @@ button {
     const dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
     lastT = now;
     phase += dt * SPIN;                // 回り続けるので毎フレーム描く
+    updateView(dt);
     if (mode === 'back') {             // つかんだけど投げなかった: 元の位置へなめらかに戻る
       const k = 1 - Math.exp(-dt * 14);
       cx += (baseCx - cx) * k; top += (baseTop - top) * k; bottom = top + potH;
@@ -607,7 +617,33 @@ button {
   }
 
   // 説明シートを閉じたら、ヒントを出す
+  // ---- スマホの傾きで、少し覗き込む ----
+  // 前後の傾き → 見下ろし具合（K0 ± KR）、左右の傾き → 光の向き（最大 ±LROT ラジアン）。
+  // 「いまの持ち方」を基準にして、基準はゆっくり（約4秒）いまの傾きへ寄るので、傾けた動きだけが効く
+  const K0 = 0.28, KR = 0.12, LROT = 0.5, TMAX = 25;   // TMAX = これだけ傾けると最大（度）
+  let tiltB = null, tiltG = 0, baseB = 0, baseG = 0, tK = K0, tL = 0;
+  addEventListener('deviceorientation', e => {
+    if (e.beta == null || e.gamma == null) return;
+    if (tiltB === null) { baseB = e.beta; baseG = e.gamma; }
+    tiltB = e.beta; tiltG = e.gamma;
+  });
+  function updateView(dt) {
+    if (tiltB !== null) {
+      const a = 1 - Math.exp(-dt / 4);
+      baseB += (tiltB - baseB) * a; baseG += (tiltG - baseG) * a;
+      const db = Math.max(-TMAX, Math.min(TMAX, tiltB - baseB)), dg = Math.max(-TMAX, Math.min(TMAX, tiltG - baseG));
+      tK = K0 - db / TMAX * KR;          // 上側を奥へ倒す（beta が減る）ほど、上から口の中を覗く
+      tL = dg / TMAX * LROT;
+    }
+    const k = 1 - Math.exp(-dt * 8);     // 手ぶれが出ないよう、なめらかに追いかける
+    if (Math.abs(tK - K) > 1e-4 || Math.abs(tL - lAng) > 1e-4) setView(K + (tK - K) * k, lAng + (tL - lAng) * k);
+  }
+
   document.getElementById('go').onclick = () => {
+    // iPhone は傾きセンサーの許可がいる（ボタンを押したときにしか聞けない）
+    if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().catch(() => {});
+    }
     document.getElementById('start').classList.add('hide');
     hint.classList.remove('hide');
   };
