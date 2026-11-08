@@ -11,7 +11,7 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body {
   margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
-  background: #5b6376; color: var(--ink); touch-action: none;
+  background: #fff; color: var(--ink); touch-action: none;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
   font: 500 15px/1.3 "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; letter-spacing: -.01em;
 }
@@ -136,6 +136,9 @@ const canvas = document.getElementById('c');
 const hint = document.getElementById('hint');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setClearColor(0x000000, 0);
+// ドロップシャドウ: 左上手前からの光で、壺の奥の壁に、ぼかした影を落とす（影だけが見える透明な面）
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.VSMShadowMap;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 60);
 
@@ -295,6 +298,18 @@ const potGroup = new THREE.Group();             // 位置・傾き（投げた�
 const potMesh = new THREE.Mesh(potGeo, potMat); // ろくろの回転
 potMesh.frustumCulled = false;
 potGroup.add(potMesh); scene.add(potGroup);
+potMesh.castShadow = true;
+const sun = new THREE.DirectionalLight(0xffffff, 1);
+sun.position.set(-1.1, 1.5, 3.2); sun.target.position.set(0, 0, 0);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.radius = 10; sun.shadow.blurSamples = 16;  // 影のぼかし
+sun.shadow.bias = -0.0005;
+scene.add(sun, sun.target);
+const shadowMat = new THREE.ShadowMaterial({ opacity: 0.16 });
+const backdrop = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), shadowMat);   // 奥の壁（影を受けるだけ）
+backdrop.receiveShadow = true;
+scene.add(backdrop);
 
 // ---- 物理（cannon-es） ----
 const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -G, 0) });
@@ -319,6 +334,11 @@ function buildArena() {                          // 画面の見える範囲を�
   add([0, -1, 0], [0, ceilY, 0]);
   add([1, 0, 0], [-halfW, 0, 0]); add([-1, 0, 0], [halfW, 0, 0]);
   add([0, 0, 1], [0, 0, -halfD]); add([0, 0, -1], [0, 0, halfD]);
+  // 影を受ける面と、影を作る範囲を箱に合わせる
+  backdrop.position.set(0, TARGET.y, -halfD); backdrop.scale.set(halfW * 6, VIS_H * 4, 1);
+  const sc = sun.shadow.camera, ext = Math.max(halfW, VIS_H / 2) * 1.6;
+  sc.left = -ext; sc.right = ext; sc.top = ext; sc.bottom = -ext; sc.near = 0.5; sc.far = 12;
+  sc.updateProjectionMatrix();
 }
 // 点の集まりの凸包を、cannon の当たり判定の形にする
 function convexShape(points) {
@@ -521,7 +541,7 @@ function shatter() {
     geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nor), 3));
     geo.setAttribute('aOrig', new THREE.BufferAttribute(new Float32Array(pos), 3));
     geo.setAttribute('aType', new THREE.BufferAttribute(new Float32Array(typ), 1));
-    const mesh = new THREE.Mesh(geo, shardMat); mesh.frustumCulled = false;
+    const mesh = new THREE.Mesh(geo, shardMat); mesh.frustumCulled = false; mesh.castShadow = true;
     const body = new CANNON.Body({ mass: pc.mass, material: mShard });
     const ball = new CANNON.Sphere(T * 0.6);
     for (const q of pc.balls) body.addShape(ball, new CANNON.Vec3(q.x - cx, q.y - cy, q.z - cz));
