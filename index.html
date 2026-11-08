@@ -5,17 +5,89 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>pot-reset 試作 — 壺をつくる</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #5b6376; overflow: hidden; }
-  body { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
-         font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif; }
-  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-  #hint { position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 28px); text-align: center;
-          color: #c3c8d3; font-size: 14px; letter-spacing: .08em; pointer-events: none; transition: opacity .6s; }
+/* UI は pixel-stretch-test と同じ考え方: 白い紙、1px の黒い線、実線／点線の区切り、カプセル形、太いグロテスク体。
+   壺の舞台（背景の色）はそのまま */
+:root { --ink: #111; --paper: #fff; --line: 1px solid var(--ink); }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
+  background: #5b6376; color: var(--ink); touch-action: none;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  font: 500 15px/1.3 "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; letter-spacing: -.01em;
+}
+canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+button {
+  font: inherit; color: var(--ink); background: var(--paper); cursor: pointer; touch-action: manipulation;
+  border: var(--line); border-radius: 999px; min-height: 44px; padding: 0 14px;
+}
+.small { font-size: 12px; font-weight: 700; }
+
+/* ---- 最初の説明シート ---- */
+#start {
+  position: fixed; inset: 0; overflow-y: auto; touch-action: pan-y; background: var(--paper);
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 12px calc(env(safe-area-inset-bottom, 0px) + 12px);
+}
+#start.hide { display: none; }
+.sheet {
+  min-height: 100%; display: flex; flex-direction: column; gap: 18px;
+  border: var(--line); border-radius: 22px; padding: 16px 18px 18px;
+}
+.meta { display: flex; justify-content: space-between; gap: 12px; }
+.sheet h1 { margin: auto 0 0; font-size: 60px; line-height: .88; font-weight: 700; letter-spacing: -.045em; }
+.diagram { display: block; width: 100%; height: auto; overflow: visible; }
+.diagram text { font: 700 11px "Helvetica Neue", Helvetica, Arial, sans-serif; fill: var(--ink); }
+.sheet p { margin: 0; max-width: 30em; }
+.choose { display: grid; gap: 8px; }
+.choose button {
+  min-height: 60px; padding: 0 22px; display: flex; justify-content: space-between; align-items: center;
+  font-size: 18px; font-weight: 700; letter-spacing: -.02em;
+}
+.choose button:active { background: var(--ink); color: var(--paper); }
+.sheet .foot { margin-top: auto; padding-top: 12px; border-top: 1px dashed var(--ink); }
+
+/* ---- 操作のヒント（白いカプセル） ---- */
+#hint {
+  position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 14px); transform: translateX(-50%);
+  width: max-content; max-width: calc(100% - 32px); padding: 8px 16px;
+  background: var(--paper); border: var(--line); border-radius: 18px;
+  font-size: 14px; font-weight: 700; text-align: center; pointer-events: none; transition: opacity .6s;
+}
+#hint.hide { opacity: 0; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hint">ふちを指で押す・引く</div>
+<div id="hint" class="hide">Push or pull the edge</div>
+
+<div id="start">
+  <div class="sheet">
+    <div class="meta small"><span>Prototype</span><span>Potter's wheel / Touch</span></div>
+    <h1>Pot<br>Reset.</h1>
+    <svg class="diagram" viewBox="0 0 320 170" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1">
+      <!-- 回る壺の輪郭と、ふちを押す・引く指 -->
+      <ellipse cx="160" cy="22" rx="46" ry="10" />
+      <path d="M114 22 C114 52, 140 60, 140 78 C140 98, 98 112, 98 132 C98 148, 124 156, 136 158" />
+      <path d="M206 22 C206 52, 180 60, 180 78 C180 98, 222 112, 222 132 C222 148, 196 156, 184 158" />
+      <path d="M136 158 Q160 164 184 158" />
+      <path d="M160 6 V168" stroke-dasharray="4 4" />
+      <path d="M128 10 A40 9 0 0 1 192 10" />
+      <path d="M186 6 L192 10 L185 13" />
+      <path d="M40 78 H128 M120 73 L128 78 L120 83" />
+      <path d="M232 132 H292 M284 127 L292 132 L284 137" />
+      <circle cx="140" cy="78" r="3" fill="currentColor" stroke="none" />
+      <circle cx="222" cy="132" r="3" fill="currentColor" stroke="none" />
+      <text x="40" y="70" stroke="none">push</text>
+      <text x="292" y="124" text-anchor="end" stroke="none">pull</text>
+      <text x="200" y="4" stroke="none">spin</text>
+    </svg>
+    <p>Touch the edge of the spinning pot and drag sideways. Drag in to pinch it, drag out to swell it. The colours are picked at random each time.</p>
+    <div class="choose">
+      <button id="go"><span>Start</span><span aria-hidden="true">&rarr;</span></button>
+    </div>
+    <div class="meta small foot"><span>Runs on this device</span><span>No sound</span></div>
+  </div>
+</div>
 <script>
 (() => {
   // 色の組み合わせ。c = 正面の色（口 → 胴 → 底 の3色を高さでつなぐ）、
@@ -114,7 +186,7 @@
     if (e.clientY < top - 40 || e.clientY > bottom + 40) return;
     try { cv.setPointerCapture(e.pointerId); } catch (_) {}
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    hint.style.opacity = 0;
+    hint.classList.add('hide');
   });
   cv.addEventListener('pointermove', e => {
     const p = pointers.get(e.pointerId);
@@ -333,6 +405,12 @@
     render();
     requestAnimationFrame(frame);
   }
+
+  // 説明シートを閉じたら、ヒントを出す
+  document.getElementById('go').onclick = () => {
+    document.getElementById('start').classList.add('hide');
+    hint.classList.remove('hide');
+  };
 
   addEventListener('resize', layout);
   layout();
