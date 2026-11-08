@@ -136,7 +136,7 @@ const canvas = document.getElementById('c');
 const hint = document.getElementById('hint');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setClearColor(0x000000, 0);
-// ドロップシャドウ: 左上手前からの光で、壺の奥の壁に、ぼかした影を落とす（影だけが見える透明な面）
+// ドロップシャドウ: ほぼ真上（少し左手前）からの光で、壺が立っている床に、ぼかした影を落とす（影だけが見える透明な面）
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.VSMShadowMap;
 const scene = new THREE.Scene();
@@ -300,16 +300,16 @@ potMesh.frustumCulled = false;
 potGroup.add(potMesh); scene.add(potGroup);
 potMesh.castShadow = true;
 const sun = new THREE.DirectionalLight(0xffffff, 1);
-sun.position.set(-1.1, 1.5, 3.2); sun.target.position.set(0, 0, 0);
+sun.position.set(-0.9, 3.2, 1.4); sun.target.position.set(0, -0.5, 0);
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
 sun.shadow.radius = 10; sun.shadow.blurSamples = 16;  // 影のぼかし
 sun.shadow.bias = -0.0005;
 scene.add(sun, sun.target);
 const shadowMat = new THREE.ShadowMaterial({ opacity: 0.16 });
-const backdrop = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), shadowMat);   // 奥の壁（影を受けるだけ）
-backdrop.receiveShadow = true;
-scene.add(backdrop);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), shadowMat);     // 床（影を受けるだけ。下から見ると見えない）
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true;
+scene.add(ground);
 
 // ---- 物理（cannon-es） ----
 const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -G, 0) });
@@ -323,7 +323,8 @@ let walls = [], floorBody = null, floorY = -1, ceilY = 1, halfW = 0.5, halfD = 0
 function buildArena() {                          // 画面の見える範囲を囲む箱（床・天井・左右・前後）
   for (const b of walls) world.removeBody(b);
   walls = [];
-  halfW = VIS_H * aspect / 2; floorY = TARGET.y - VIS_H / 2 + 0.1; ceilY = TARGET.y + VIS_H / 2;
+  // 床は壺の底の高さ（壺は床に立っていて、割れた破片もこの床に落ちてたまる）
+  halfW = VIS_H * aspect / 2; floorY = -0.5; ceilY = TARGET.y + VIS_H / 2;
   halfD = Math.max(0.7, rMax + 0.15);            // 前後の壁（広い画面で太い壺が壁にめり込まないように）
   const add = (n, p) => {
     const b = new CANNON.Body({ mass: 0, material: mWall, shape: new CANNON.Plane() });
@@ -335,8 +336,8 @@ function buildArena() {                          // 画面の見える範囲を�
   add([1, 0, 0], [-halfW, 0, 0]); add([-1, 0, 0], [halfW, 0, 0]);
   add([0, 0, 1], [0, 0, -halfD]); add([0, 0, -1], [0, 0, halfD]);
   // 影を受ける面と、影を作る範囲を箱に合わせる
-  backdrop.position.set(0, TARGET.y, -halfD); backdrop.scale.set(halfW * 6, VIS_H * 4, 1);
-  const sc = sun.shadow.camera, ext = Math.max(halfW, VIS_H / 2) * 1.6;
+  ground.position.set(0, floorY, 0); ground.scale.set(halfW * 2, halfD * 2, 1);   // 箱の床の広さだけ
+  const sc = sun.shadow.camera, ext = Math.max(halfW, halfD, VIS_H / 2) * 1.8;
   sc.left = -ext; sc.right = ext; sc.top = ext; sc.bottom = -ext; sc.near = 0.5; sc.far = 12;
   sc.updateProjectionMatrix();
 }
@@ -641,7 +642,7 @@ canvas.addEventListener('pointermove', e => {
     // 壺が箱（床・天井・壁）にめり込まないよう、中心を「半分の高さ・いちばん太い半径」ぶん内側に収める
     let rm = 0; for (let i = 0; i < N; i++) rm = Math.max(rm, radius[i]);
     const cl = (v, lo, hi) => lo > hi ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, v));
-    potGroup.position.set(cl(w.x, -halfW + rm, halfW - rm), cl(w.y, floorY + 0.52, ceilY - 0.52), cl(w.z, -halfD + rm, halfD - rm));
+    potGroup.position.set(cl(w.x, -halfW + rm, halfW - rm), cl(w.y, floorY + 0.5, ceilY - 0.52), cl(w.z, -halfD + rm, halfD - rm));
     const t = performance.now();
     grab.hist.push({ x: e.clientX, y: e.clientY, t });
     while (grab.hist.length > 2 && t - grab.hist[0].t > 100) grab.hist.shift();
