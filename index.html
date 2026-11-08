@@ -87,7 +87,7 @@ button {
     <div class="choose">
       <button id="go"><span>Start</span><span aria-hidden="true">&rarr;</span></button>
     </div>
-    <div class="meta small foot"><span>Runs on this device</span><span>No sound</span></div>
+    <div class="meta small foot"><span>Runs on this device</span><a href="./sound.html" style="color:inherit">Sound samples</a></div>
   </div>
 </div>
 <script type="importmap">
@@ -101,6 +101,10 @@ button {
 import * as THREE from 'three';
 import { ConvexHull } from 'three/addons/math/ConvexHull.js';
 import * as CANNON from 'cannon-es';
+import * as SE from './sound.js';
+
+// 効果音のキット（?se=clay|porcelain|wheel|toy。試聴は sound.html）
+SE.setKit(new URLSearchParams(location.search).get('se'));
 
 // 3D 版。壺は「縦の輪郭（高さごとの半径）」を軸のまわりに回した立体（WebGL で描く）。
 // 見た目（ごく弱い陰、別の色へ置きかえる幅広いリム、粒、高さの3色）はシェーダーで再現する。
@@ -518,7 +522,7 @@ function fracture(impact) {                      // impact: 壺の中での、�
 let mode = 'shape', grab = null, potBody = null, flyT = 0, hits = 0, lastHit = -1, lastImpact = null, breakNow = false;
 let shards = [], restT = 0, waitT = 0, draining = false, dropV = 0, spin = 0, shardMat = null;
 
-let fragile = false;                             // 振って飛ばしたとき: 最初にぶつかった所で割れる
+let fragile = false, lastIv = 0;                 // 振って飛ばしたとき: 最初にぶつかった所で割れる
 function throwPot(vx, vy, brittle = false) {     // vx, vy: 画面の上で指が動いた速さ（px/秒）
   const ppu = H / VIS_H;
   const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
@@ -544,11 +548,12 @@ function throwPot(vx, vy, brittle = false) {     // vx, vy: 画面の上で指�
     lastHit = flyT; hits++;
     const c = e.contact, pt = new CANNON.Vec3();
     if (c.bi === potBody) potBody.position.vadd(c.ri, pt); else potBody.position.vadd(c.rj, pt);
-    lastImpact = pt;
+    lastImpact = pt; lastIv = iv;
     if (hits >= 3 || iv > 4 || fragile) breakNow = true;   // 3回ぶつかるか、強くぶつかったら割れる（床が足元にあるので落差は小さい）
+    else SE.hit(iv / 5, pt.x / halfW);                      // 割れないときは、ぶつかった音
   });
   world.addBody(potBody);
-  flyT = 0; hits = 0; lastHit = -1; breakNow = false; lastImpact = null; fragile = brittle;
+  flyT = 0; hits = 0; lastHit = -1; breakNow = false; lastImpact = null; lastIv = 0; fragile = brittle;
   mode = 'fly';
 }
 function shatter() {
@@ -557,6 +562,7 @@ function shatter() {
   if (shardMat) shardMat.dispose();
   shardMat = potMat.clone(); applyPreset(shardMat, preset);
   const impactW = lastImpact ? new THREE.Vector3(lastImpact.x, lastImpact.y, lastImpact.z) : new THREE.Vector3().copy(potBody.position);
+  SE.crack(0.6 + lastIv / 10, impactW.x / halfW);
   for (const pc of pieces) {
     const { pos, nor, typ } = pc.B;
     if (pos.length < 9) continue;
@@ -577,6 +583,10 @@ function shatter() {
     const ball = new CANNON.Sphere(T * 0.6);
     for (const q of pc.balls) body.addShape(ball, new CANNON.Vec3(q.x - cx, q.y - cy, q.z - cz));
     body.sleepSpeedLimit = 0.12; body.sleepTimeLimit = 0.4;
+    body.addEventListener('collide', e => {      // 破片が床や他の破片に当たる小さな音
+      const iv = Math.abs(e.contact.getImpactVelocityAlongNormal());
+      if (iv > 0.7) SE.tick(iv / 3, body.position.x / halfW);
+    });
     const wp = potBody.pointToWorldFrame(new CANNON.Vec3(cx, cy, cz));
     body.position.copy(wp); body.quaternion.copy(potBody.quaternion);
     // 速さ: 割れた瞬間の壺の、その点の速さ（並進＋回転）に、ぶつかった所から外へ散る分を足す
@@ -640,11 +650,12 @@ function potScreen() {                           // 止まっている壺の、�
 const HOLD_MS = 450, HOLD_MOVE = 8;              // 長押しの時間と、そのあいだ動いてもよい幅（px）
 const pointers = new Map();
 canvas.addEventListener('pointerdown', e => {
+  SE.unlock();
   if (mode !== 'shape') return;
   const s = potScreen();
   if (e.clientY < s.top - 40 || e.clientY > s.bottom + 40) return;
   try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
-  const p = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, timer: 0 };
+  const p = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, timer: 0, t: performance.now() };
   p.timer = setTimeout(() => startGrab(e.pointerId, p), HOLD_MS);
   pointers.set(e.pointerId, p);
   hint.classList.add('hide');
@@ -685,7 +696,10 @@ canvas.addEventListener('pointermove', e => {
   const dx = (Math.abs(e.clientX - s.cx) - Math.abs(p.x - s.cx)) / s.ppu;
   const t = Math.min(1, Math.max(0, (e.clientY - s.top) / (s.bottom - s.top)));
   push(t, rAt(t) + dx);
-  p.x = e.clientX; p.y = e.clientY;
+  // 触っている音: 指の速さで強く。音階キットは、触った所が細いほど高い
+  const now = performance.now(), ms = Math.max(8, now - p.t);
+  SE.touch(Math.hypot(e.clientX - p.x, e.clientY - p.y) / ms * 1000 / 600, 1 - (rAt(t) - rMin) / (rMax - rMin));
+  p.x = e.clientX; p.y = e.clientY; p.t = now;
 });
 const up = e => {
   const p = pointers.get(e.pointerId);
@@ -779,7 +793,7 @@ function step(now) {
   }
   if (mode === 'drop') {                         // 次の筒が上から降ってきて、元の位置で小さく弾んで止まる
     dropV -= G * dt; potGroup.position.y += dropV * dt;
-    if (potGroup.position.y <= 0) { potGroup.position.y = 0; if (dropV < -1.2) dropV = -dropV * 0.22; else { dropV = 0; mode = 'shape'; } }
+    if (potGroup.position.y <= 0) { potGroup.position.y = 0; if (dropV < -1.2) { SE.land(-dropV / 8); dropV = -dropV * 0.22; } else { dropV = 0; mode = 'shape'; } }
   }
   if (dt > 0 && (potBody || shards.length)) { const t0 = performance.now(); world.step(1 / 120, dt, 8); physMs = physMs * 0.9 + (performance.now() - t0) * 0.1; }
   if (mode === 'fly') {
@@ -791,6 +805,8 @@ function step(now) {
   if (shards.length) stepShards(dt);
   if (shapeDirty) updatePotGeometry();
   updateShadows();
+  SE.setSpinning(mode === 'shape' || mode === 'grab' || mode === 'back' || mode === 'drop');
+  SE.update(dt);
   renderer.render(scene, camera);
 }
 
@@ -810,6 +826,7 @@ function layout() {
 
 // 説明シートを閉じたら、ヒントを出す。iPhone は傾きセンサーの許可がいる（ボタンを押したときにしか聞けない）
 document.getElementById('go').onclick = () => {
+  SE.unlock();
   if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
     DeviceOrientationEvent.requestPermission().catch(() => {});
   }

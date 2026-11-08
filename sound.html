@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>pot-reset 試作 — 効果音の試聴</title>
+<style>
+/* index.html と同じ考え方: 白い紙、1px の黒い線、カプセル形、太いグロテスク体 */
+:root { --ink: #111; --paper: #fff; --line: 1px solid var(--ink); }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 500 15px/1.35 "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; letter-spacing: -.01em;
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 12px calc(env(safe-area-inset-bottom, 0px) + 24px);
+}
+h1 { margin: 8px 6px 4px; font-size: 44px; line-height: .9; font-weight: 700; letter-spacing: -.045em; }
+.lead { margin: 10px 6px 18px; font-size: 13px; }
+.kit { border: var(--line); border-radius: 22px; padding: 14px 14px 16px; margin-bottom: 12px; display: grid; gap: 10px; }
+.kit .head { display: flex; justify-content: space-between; align-items: baseline; font-weight: 700; }
+.kit .head b { font-size: 22px; letter-spacing: -.02em; }
+.kit p { margin: 0; font-size: 13px; }
+.row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+button, a.go {
+  font: inherit; font-size: 13px; font-weight: 700; color: var(--ink); background: var(--paper); cursor: pointer;
+  border: var(--line); border-radius: 999px; min-height: 44px; padding: 0 12px; touch-action: manipulation;
+  display: flex; align-items: center; justify-content: center; text-decoration: none;
+}
+button:active { background: var(--ink); color: var(--paper); }
+a.go { justify-content: space-between; padding: 0 18px; font-size: 15px; }
+.pad {
+  height: 64px; border: 1px dashed var(--ink); border-radius: 18px; touch-action: none;
+  display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; user-select: none;
+}
+</style>
+</head>
+<body>
+<h1>Sound<br>samples.</h1>
+<p class="lead">4種類の効果音を聞き比べるページ。点線の枠を指でこすると「触っている音」（速くこするほど強い。音階は左右で高さが変わる）。気に入ったら下の黒い矢印から、その音で遊べます。iPhone はマナーモードだと鳴りません。</p>
+<div id="kits"></div>
+<script type="module">
+import * as SE from './sound.js';
+const box = document.getElementById('kits');
+for (const id of SE.KIT_IDS) {
+  const k = SE.KITS[id];
+  const el = document.createElement('div'); el.className = 'kit';
+  el.innerHTML = `<div class="head"><b>${k.ja}</b><span>${k.name}</span></div><p>${k.desc}</p>
+    <div class="pad">ここをこする</div>
+    <div class="row"><button data-a="hit">ぶつかる</button><button data-a="crack">割れる</button><button data-a="ticks">破片</button></div>
+    <a class="go" href="./?se=${id}"><span>この音で遊ぶ</span><span>&rarr;</span></a>`;
+  box.append(el);
+  const use = () => { SE.unlock(); if (SE.getKit() !== id) SE.setKit(id); };
+  el.querySelectorAll('button').forEach(b => b.onclick = () => {
+    use();
+    const a = b.dataset.a;
+    if (a === 'hit') SE.hit(0.8);
+    else if (a === 'crack') SE.crack(1);
+    else for (let i = 0; i < 9; i++) setTimeout(() => SE.tick(Math.random() * 0.8 + 0.2, Math.random() - 0.5), i * 70 + Math.random() * 60);
+  });
+  const pad = el.querySelector('.pad'); let last = null;
+  pad.addEventListener('pointerdown', e => { use(); pad.setPointerCapture(e.pointerId); SE.setSpinning(true); last = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+  pad.addEventListener('pointermove', e => {
+    if (!last) return;
+    const r = pad.getBoundingClientRect(), now = performance.now();
+    SE.touch(Math.hypot(e.clientX - last.x, e.clientY - last.y) / Math.max(8, now - last.t) * 1000 / 600, (e.clientX - r.left) / r.width);
+    last = { x: e.clientX, y: e.clientY, t: now };
+  });
+  const end = () => { last = null; SE.setSpinning(false); };
+  pad.addEventListener('pointerup', end); pad.addEventListener('pointercancel', end);
+}
+SE.setKit('clay');
+let lt = 0;
+(function loop(t) { SE.update(lt ? Math.min(0.05, (t - lt) / 1000) : 0); lt = t; requestAnimationFrame(loop); })(0);
+</script>
+</body>
+</html>
