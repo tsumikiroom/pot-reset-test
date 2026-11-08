@@ -203,6 +203,8 @@ button {
   // 長押し: 指がほとんど動かないまま HOLD_MS たつと、壺をつかむ
   function startGrab(id, p) {
     if (mode !== 'shape' || p.moved || pointers.get(id) !== p) return;
+    // つかめるのは壺の上（その高さの胴の幅＋少しの余白）を押しているときだけ
+    if (Math.abs(p.x - cx) > rAt(Math.min(bottom, Math.max(top, p.y))) + 24) return;
     mode = 'grab';
     for (const [k, q] of pointers) if (k !== id) { clearTimeout(q.timer); pointers.delete(k); }
     top -= 10; bottom = top + potH;              // 少し持ち上がる
@@ -214,7 +216,9 @@ button {
     if (!p) return;
     if (mode === 'grab') {
       if (grab.id !== e.pointerId) return;
-      cx = e.clientX + grab.offX; top = e.clientY + grab.offY; bottom = top + potH;
+      // 壺の中心は画面の中に収める（外へ持ち出すと、投げる絵が空になるため）
+      cx = Math.min(W, Math.max(0, e.clientX + grab.offX));
+      top = Math.min(H, Math.max(0, e.clientY + grab.offY + potH / 2)) - potH / 2; bottom = top + potH;
       const t = performance.now();
       grab.hist.push({ x: e.clientX, y: e.clientY, t });
       while (grab.hist.length > 2 && t - grab.hist[0].t > 100) grab.hist.shift();
@@ -252,6 +256,7 @@ button {
   function throwPot(vx, vy) {
     render();                                     // いまの見た目を1枚の絵にして飛ばす
     const b = prevBox, w = b.x1 - b.x0, h = b.y1 - b.y0;
+    if (w < 2 || h < 2) { mode = 'back'; return; }   // 念のため: 描くものが無ければ投げずに戻す
     const sp = document.createElement('canvas'); sp.width = w; sp.height = h;
     sp.getContext('2d').putImageData(img, -b.x0, -b.y0, b.x0, b.y0, w, h);
     const ox = cx * S - b.x0, oy = (top + bottom) / 2 * S - b.y0;   // 絵の中の、壺の中心
@@ -307,6 +312,7 @@ button {
     }
     pile = new Float32Array(Math.ceil(W / 4) + 2);   // 画面下にたまった破片の高さ（4px ごと）
     flyer = null; restT = 0; waitT = 0; draining = false; mode = 'shards';
+    if (!shards.length) drain();                  // 念のため: 破片が1つも無ければ、すぐ次の筒へ
   }
   // 多角形 poly を「点 a の側」（a と b の垂直二等分線で分けた a 側）だけに切る
   function clipHalf(poly, a, b) {
